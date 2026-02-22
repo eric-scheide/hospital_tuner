@@ -1,0 +1,19 @@
+{
+  "name": "hospital-tuner",
+  "version": "0.1.0",
+  "description": "Browser-based waterfall chromatic tuner with chord detection",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:wasm": "wasm-pack build wasm/ --target web --out-dir ../public/wasm-pkg",
+    "dev": "npm run build:wasm && vite",
+    "build": "npm run build:wasm && vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "@sveltejs/vite-plugin-svelte": "^3.0.0",
+    "svelte": "^4.0.0",
+    "vite": "^5.0.0",
+    "vite-plugin-wasm": "^3.3.0"
+  }
+}

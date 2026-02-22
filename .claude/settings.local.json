@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python3:*)",
+      "Bash(wc:*)",
+      "Bash(npm run build:wasm:*)",
+      "Bash(git -C /Users/eric/hospitalTuner status)",
+      "Bash(git -C /Users/eric/hospitalTuner add -A)",
+      "Bash(git -C:*)"
+    ]
+  }
+}

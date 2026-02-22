@@ -1,0 +1,639 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hospital Tuner — Test Suite</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; }
+    body { background: #111; color: #eee; font-family: monospace; padding: 24px; }
+    h1 { font-size: 18px; margin-bottom: 16px; color: #ccc; }
+    h2 { font-size: 14px; margin: 20px 0 8px; color: #888; text-transform: uppercase; letter-spacing: 0.05em; }
+    .test { padding: 6px 12px; margin: 4px 0; border-radius: 4px; font-size: 13px; }
+    .pass { background: #052e16; color: #4ade80; }
+    .fail { background: #450a0a; color: #f87171; }
+    .running { background: #1a1a1a; color: #facc15; }
+    .detail { color: #888; font-size: 11px; margin-left: 16px; }
+    #run-btn {
+      padding: 8px 24px; border: none; border-radius: 4px;
+      background: #22c55e; color: #000; font-family: monospace;
+      font-size: 14px; font-weight: bold; cursor: pointer; margin-bottom: 16px;
+    }
+    #run-btn:disabled { opacity: 0.5; cursor: default; }
+    #run-btn:hover:not(:disabled) { background: #16a34a; }
+    #summary { margin-top: 16px; padding: 12px; border-radius: 4px; font-size: 14px; font-weight: bold; }
+    .summary-pass { background: #052e16; color: #4ade80; }
+    .summary-fail { background: #450a0a; color: #f87171; }
+  </style>
+</head>
+<body>
+  <h1>Hospital Tuner — Test Suite</h1>
+  <button id="run-btn" onclick="runAllTests()">Run Tests</button>
+  <div id="results"></div>
+  <div id="summary"></div>
+
+<script type="module">
+
+// ---------------------------------------------------------------------------
+// Test runner
+// ---------------------------------------------------------------------------
+
+const results = document.getElementById('results');
+const summaryEl = document.getElementById('summary');
+let passed = 0;
+let failed = 0;
+
+function section(name) {
+  const h = document.createElement('h2');
+  h.textContent = name;
+  results.appendChild(h);
+}
+
+function logTest(name, ok, detail) {
+  const div = document.createElement('div');
+  div.className = `test ${ok ? 'pass' : 'fail'}`;
+  div.textContent = `${ok ? 'PASS' : 'FAIL'} — ${name}`;
+  results.appendChild(div);
+  if (detail) {
+    const d = document.createElement('div');
+    d.className = 'detail';
+    d.textContent = detail;
+    results.appendChild(d);
+  }
+  if (ok) passed++; else failed++;
+}
+
+function assert(cond, name, detail) {
+  logTest(name, cond, detail);
+}
+
+// ---------------------------------------------------------------------------
+// 1. Wasm compilation tests
+// ---------------------------------------------------------------------------
+
+async function testWasmCompilation() {
+  section('Wasm Compilation');
+
+  // Test: .wasm file is fetchable
+  let response;
+  try {
+    response = await fetch('/wasm-pkg/hospital_tuner_dsp_bg.wasm');
+    assert(response.ok, 'Wasm binary is fetchable', `status: ${response.status}`);
+  } catch (e) {
+    assert(false, 'Wasm binary is fetchable', e.message);
+    return null;
+  }
+
+  // Test: Content-Type header
+  const ct = response.headers.get('Content-Type') || '';
+  assert(
+    ct.includes('wasm') || ct.includes('octet-stream'),
+    'Wasm served with valid Content-Type',
+    `Content-Type: ${ct}`
+  );
+
+  // Test: can compile the module
+  let wasmModule;
+  try {
+    const response2 = await fetch('/wasm-pkg/hospital_tuner_dsp_bg.wasm');
+    wasmModule = await WebAssembly.compileStreaming(response2);
+    assert(wasmModule instanceof WebAssembly.Module, 'WebAssembly.Module compiles successfully');
+  } catch (e) {
+    assert(false, 'WebAssembly.Module compiles successfully', e.message);
+    return null;
+  }
+
+  // Test: module has expected exports
+  const exports = WebAssembly.Module.exports(wasmModule);
+  const exportNames = exports.map(e => e.name);
+  assert(exportNames.includes('memory'), 'Wasm exports "memory"');
+  assert(exportNames.includes('tunerprocessor_new'), 'Wasm exports "tunerprocessor_new"');
+  assert(exportNames.includes('tunerprocessor_process'), 'Wasm exports "tunerprocessor_process"');
+
+  return wasmModule;
+}
+
+// ---------------------------------------------------------------------------
+// 2. Wasm instantiation + DSP unit tests (main thread, no worklet)
+// ---------------------------------------------------------------------------
+
+async function testWasmDSP(wasmModule) {
+  section('Wasm DSP (direct instantiation)');
+
+  if (!wasmModule) {
+    assert(false, 'Skipped — Wasm compilation failed');
+    return;
+  }
+
+  // Instantiate with the same imports the worklet uses
+  let wasm;
+  try {
+    const imports = {
+      __proto__: null,
+      "./hospital_tuner_dsp_bg.js": {
+        __proto__: null,
+        __wbg___wbindgen_throw_be289d5034ed271b: function(arg0, arg1) {
+          const buf = new Uint8Array(wasm.memory.buffer);
+          const str = new TextDecoder().decode(buf.subarray(arg0, arg0 + arg1));
+          throw new Error(str);
+        },
+        __wbindgen_init_externref_table: function() {
+          const table = wasm.__wbindgen_externrefs;
+          const offset = table.grow(4);
+          table.set(0, undefined);
+          table.set(offset + 0, undefined);
+          table.set(offset + 1, null);
+          table.set(offset + 2, true);
+          table.set(offset + 3, false);
+        },
+      },
+    };
+    const instance = new WebAssembly.Instance(wasmModule, imports);
+    wasm = instance.exports;
+    wasm.__wbindgen_start();
+    assert(true, 'Wasm instantiates with correct imports');
+  } catch (e) {
+    assert(false, 'Wasm instantiates with correct imports', e.message);
+    return;
+  }
+
+  // Helper: pass f32 array to wasm
+  function passF32(arr) {
+    const ptr = wasm.__wbindgen_malloc(arr.length * 4, 4) >>> 0;
+    new Float32Array(wasm.memory.buffer).set(arr, ptr / 4);
+    return { ptr, len: arr.length };
+  }
+
+  // Test: construct TunerProcessor
+  let procPtr;
+  try {
+    procPtr = wasm.tunerprocessor_new(44100.0);
+    assert(procPtr > 0, 'TunerProcessor constructed at 44100 Hz', `ptr: ${procPtr}`);
+  } catch (e) {
+    assert(false, 'TunerProcessor constructed at 44100 Hz', e.message);
+    return;
+  }
+
+  // Test: feeding silence returns no result initially (buffering)
+  const silence = new Float32Array(128);
+  const { ptr: sPtr, len: sLen } = passF32(silence);
+  let ret = wasm.tunerprocessor_process(procPtr, sPtr, sLen);
+  assert(ret === 0, 'Silence during buffering returns null');
+
+  // Test: feed enough silence to fill buffer + trigger a hop
+  // FFT_SIZE=4096, HOP_SIZE=512. Need 4096 samples total, in 128-sample chunks = 32 chunks.
+  // Then need 512 more for the next hop = 4 more chunks.
+  let lastResult = 0;
+  for (let i = 0; i < 36; i++) {
+    const { ptr, len } = passF32(silence);
+    lastResult = wasm.tunerprocessor_process(procPtr, ptr, len);
+  }
+
+  // We should have gotten at least one result by now
+  // (result might be 0 if the hop alignment doesn't produce one, that's ok)
+  assert(true, 'Fed 36 silence chunks without crash');
+
+  // Test: feed a 440 Hz sine wave and check for A4 detection
+  wasm.tunerprocessor_reset(procPtr);
+  const sr = 44100;
+  const freq = 440;
+  let gotResult = false;
+  let chromaA = 0;
+  let dominantFreq = 0;
+
+  // Need to fill ring buffer (4096) + trigger hops. Feed 8192 samples total.
+  for (let chunk = 0; chunk < 64; chunk++) {
+    const samples = new Float32Array(128);
+    for (let i = 0; i < 128; i++) {
+      const t = (chunk * 128 + i) / sr;
+      samples[i] = 0.5 * Math.sin(2 * Math.PI * freq * t);
+    }
+    const { ptr, len } = passF32(samples);
+    const resultPtr = wasm.tunerprocessor_process(procPtr, ptr, len);
+    if (resultPtr !== 0) {
+      gotResult = true;
+      // Read chroma[9] (A = pitch class 9)
+      const chromaPtr = wasm.chromaresult_chroma_ptr(resultPtr) >>> 0;
+      const chromaArr = new Float32Array(wasm.memory.buffer, chromaPtr, 12).slice();
+      chromaA = chromaArr[9];
+      dominantFreq = wasm.chromaresult_dominant_frequency(resultPtr);
+      wasm.__wbg_chromaresult_free(resultPtr, 0);
+    }
+  }
+
+  assert(gotResult, '440 Hz sine produces a ChromaResult');
+  assert(
+    chromaA > 0.5,
+    '440 Hz sine → chroma[9] (A) is dominant',
+    `chroma[9] = ${chromaA.toFixed(3)}`
+  );
+  assert(
+    Math.abs(dominantFreq - 440) < 20,
+    'Dominant frequency near 440 Hz',
+    `dominant = ${dominantFreq.toFixed(1)} Hz`
+  );
+
+  // Test: C major chord (C4=261.6, E4=329.6, G4=392.0)
+  // The DSP gate requires a noise floor to distinguish signal from noise.
+  // Feed low-level noise first to establish the floor (mimics real mic input),
+  // then introduce the chord signal which rises above the established floor.
+  wasm.tunerprocessor_reset(procPtr);
+
+  // Phase 1: warmup with low-level noise to establish noise floor (~48 chunks = 6144 samples)
+  for (let chunk = 0; chunk < 48; chunk++) {
+    const noise = new Float32Array(128);
+    for (let i = 0; i < 128; i++) {
+      noise[i] = (Math.random() - 0.5) * 0.001; // very quiet noise
+    }
+    const { ptr, len } = passF32(noise);
+    const r = wasm.tunerprocessor_process(procPtr, ptr, len);
+    if (r !== 0) wasm.__wbg_chromaresult_free(r, 0); // discard warmup frames
+  }
+
+  // Phase 2: feed the chord signal (64 chunks = 8192 samples)
+  const chordFreqs = [261.63, 329.63, 392.00];
+  let chordChroma = null;
+  const chordStartSample = 48 * 128; // continue time from warmup
+  for (let chunk = 0; chunk < 64; chunk++) {
+    const samples = new Float32Array(128);
+    for (let i = 0; i < 128; i++) {
+      const t = (chordStartSample + chunk * 128 + i) / sr;
+      let val = 0;
+      for (const f of chordFreqs) {
+        val += 0.3 * Math.sin(2 * Math.PI * f * t);
+      }
+      samples[i] = val;
+    }
+    const { ptr, len } = passF32(samples);
+    const resultPtr = wasm.tunerprocessor_process(procPtr, ptr, len);
+    if (resultPtr !== 0) {
+      const chromaPtr = wasm.chromaresult_chroma_ptr(resultPtr) >>> 0;
+      chordChroma = new Float32Array(wasm.memory.buffer, chromaPtr, 12).slice();
+      wasm.__wbg_chromaresult_free(resultPtr, 0);
+    }
+  }
+
+  if (chordChroma) {
+    // C=0, E=4, G=7 should be the three brightest
+    const indexed = Array.from(chordChroma).map((v, i) => ({ pc: i, v }));
+    indexed.sort((a, b) => b.v - a.v);
+    const top3 = new Set(indexed.slice(0, 3).map(x => x.pc));
+    const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
+    const top3Names = [...top3].map(i => names[i]).join(', ');
+    assert(
+      top3.has(0) && top3.has(4) && top3.has(7),
+      'C major chord → top 3 are C, E, G',
+      `top 3: ${top3Names} | chroma: [${chordChroma.map(v => v.toFixed(2)).join(', ')}]`
+    );
+  } else {
+    assert(false, 'C major chord → top 3 are C, E, G', 'no ChromaResult produced');
+  }
+
+  // Cleanup
+  wasm.__wbg_tunerprocessor_free(procPtr, 0);
+}
+
+// ---------------------------------------------------------------------------
+// 3. AudioWorklet integration tests
+// ---------------------------------------------------------------------------
+
+async function testWorkletIntegration(wasmModule) {
+  section('AudioWorklet Integration');
+
+  if (!wasmModule) {
+    assert(false, 'Skipped — Wasm compilation failed');
+    return;
+  }
+
+  // Test: AudioContext creation
+  let audioCtx;
+  try {
+    audioCtx = new AudioContext({ sampleRate: 44100 });
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+    assert(true, 'AudioContext created at 44100 Hz');
+  } catch (e) {
+    assert(false, 'AudioContext created at 44100 Hz', e.message);
+    return;
+  }
+
+  // Test: worklet module registration
+  try {
+    // In dev, Vite serves from src. In test.html (public), we need the raw path.
+    // Try the Vite-transformed URL first, fall back to source path.
+    await audioCtx.audioWorklet.addModule('/src/worklet/processor.js');
+    assert(true, 'AudioWorklet module registered');
+  } catch (e) {
+    assert(false, 'AudioWorklet module registered', e.message);
+    await audioCtx.close();
+    return;
+  }
+
+  // Test: worklet node creation with pre-compiled Module
+  let workletNode;
+  try {
+    workletNode = new AudioWorkletNode(audioCtx, 'hospital-tuner-processor', {
+      numberOfInputs: 1,
+      numberOfOutputs: 0,
+      channelCount: 1,
+      channelCountMode: 'explicit',
+      processorOptions: { wasmModule },
+    });
+    assert(true, 'AudioWorkletNode created with processorOptions');
+  } catch (e) {
+    assert(false, 'AudioWorkletNode created with processorOptions', e.message);
+    await audioCtx.close();
+    return;
+  }
+
+  // Test: worklet sends "ready" message
+  const readyResult = await new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve({ ok: false, reason: 'timeout (3s)' }), 3000);
+    workletNode.port.onmessage = (event) => {
+      if (event.data.type === 'ready') {
+        clearTimeout(timeout);
+        resolve({ ok: true, sampleRate: event.data.sampleRate });
+      } else if (event.data.type === 'error') {
+        clearTimeout(timeout);
+        resolve({ ok: false, reason: event.data.message });
+      }
+    };
+  });
+
+  assert(
+    readyResult.ok,
+    'Worklet posts "ready" message',
+    readyResult.ok ? `sampleRate: ${readyResult.sampleRate}` : readyResult.reason
+  );
+
+  if (!readyResult.ok) {
+    await audioCtx.close();
+    return;
+  }
+
+  // Test: feed a 440 Hz sine through the worklet and receive a tunerFrame
+  const osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.value = 440;
+  osc.connect(workletNode);
+  osc.start();
+
+  const frameResult = await new Promise((resolve) => {
+    const timeout = setTimeout(() => resolve({ ok: false, reason: 'timeout (3s)' }), 3000);
+    workletNode.port.onmessage = (event) => {
+      if (event.data.type === 'tunerFrame') {
+        clearTimeout(timeout);
+        resolve({ ok: true, frame: event.data });
+      } else if (event.data.type === 'error') {
+        clearTimeout(timeout);
+        resolve({ ok: false, reason: event.data.message });
+      }
+    };
+  });
+
+  assert(
+    frameResult.ok,
+    'Worklet produces tunerFrame from oscillator',
+    frameResult.ok
+      ? `freq: ${frameResult.frame.dominantFrequency?.toFixed(1)} Hz, cents: ${frameResult.frame.cents}`
+      : frameResult.reason
+  );
+
+  if (frameResult.ok) {
+    const f = frameResult.frame;
+
+    assert(
+      f.chroma instanceof Float32Array && f.chroma.length === 12,
+      'tunerFrame.chroma is Float32Array(12)',
+      `type: ${f.chroma?.constructor?.name}, length: ${f.chroma?.length}`
+    );
+
+    assert(
+      f.activePitchClasses instanceof Uint8Array,
+      'tunerFrame.activePitchClasses is Uint8Array'
+    );
+
+    assert(
+      typeof f.dominantFrequency === 'number',
+      'tunerFrame.dominantFrequency is a number'
+    );
+
+    assert(
+      typeof f.cents === 'number' && f.cents >= -50 && f.cents <= 50,
+      'tunerFrame.cents is in [-50, 50]',
+      `cents: ${f.cents}`
+    );
+
+    assert(
+      typeof f.timestamp === 'number' && f.timestamp >= 0,
+      'tunerFrame.timestamp is a non-negative number',
+      `timestamp: ${f.timestamp}`
+    );
+
+    // The dominant frequency should be near 440 Hz
+    assert(
+      Math.abs(f.dominantFrequency - 440) < 25,
+      'Oscillator 440 Hz → dominant freq near 440',
+      `${f.dominantFrequency?.toFixed(1)} Hz`
+    );
+
+    // chroma[9] (A) should be the brightest or near-brightest
+    const maxChroma = Math.max(...f.chroma);
+    assert(
+      f.chroma[9] >= maxChroma * 0.5,
+      'Oscillator 440 Hz → chroma[9] (A) is bright',
+      `chroma[9]=${f.chroma[9]?.toFixed(3)}, max=${maxChroma.toFixed(3)}`
+    );
+  }
+
+  // Cleanup
+  osc.stop();
+  osc.disconnect();
+  workletNode.disconnect();
+  await audioCtx.close();
+}
+
+// ---------------------------------------------------------------------------
+// 4. COOP/COEP header tests
+// ---------------------------------------------------------------------------
+
+async function testHeaders() {
+  section('Security Headers');
+
+  const isIsolated = typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
+  assert(isIsolated, 'crossOriginIsolated is true');
+
+  // Check actual headers on this page's response
+  try {
+    const resp = await fetch(location.href);
+    const coop = resp.headers.get('Cross-Origin-Opener-Policy');
+    const coep = resp.headers.get('Cross-Origin-Embedder-Policy');
+    assert(
+      coop === 'same-origin',
+      'COOP header is "same-origin"',
+      `got: "${coop}"`
+    );
+    assert(
+      coep === 'require-corp',
+      'COEP header is "require-corp"',
+      `got: "${coep}"`
+    );
+  } catch (e) {
+    assert(false, 'Could read security headers', e.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 5. Pitch sweep test — oscillator sweeps E4→G4 over 2 seconds
+// ---------------------------------------------------------------------------
+
+async function testPitchSweep(wasmModule) {
+  section('Pitch Sweep (E4 → G4)');
+
+  if (!wasmModule) {
+    assert(false, 'Skipped — Wasm compilation failed');
+    return;
+  }
+
+  let audioCtx;
+  try {
+    audioCtx = new AudioContext({ sampleRate: 44100 });
+    if (audioCtx.state === 'suspended') await audioCtx.resume();
+  } catch (e) {
+    assert(false, 'AudioContext for sweep test', e.message);
+    return;
+  }
+
+  try {
+    await audioCtx.audioWorklet.addModule('/src/worklet/processor.js');
+  } catch (e) {
+    assert(false, 'Worklet registered for sweep', e.message);
+    await audioCtx.close();
+    return;
+  }
+
+  const workletNode = new AudioWorkletNode(audioCtx, 'hospital-tuner-processor', {
+    numberOfInputs: 1,
+    numberOfOutputs: 0,
+    channelCount: 1,
+    channelCountMode: 'explicit',
+    processorOptions: { wasmModule },
+  });
+
+  // Wait for ready
+  const ready = await new Promise((resolve) => {
+    const t = setTimeout(() => resolve(false), 3000);
+    workletNode.port.onmessage = (e) => {
+      if (e.data.type === 'ready') { clearTimeout(t); resolve(true); }
+    };
+  });
+
+  if (!ready) {
+    assert(false, 'Worklet ready for sweep', 'timeout');
+    await audioCtx.close();
+    return;
+  }
+
+  // Create oscillator sweeping E4 (329.63 Hz) → G4 (392.00 Hz) over 2 seconds
+  const E4 = 329.63;
+  const G4 = 392.00;
+  const osc = audioCtx.createOscillator();
+  osc.type = 'sine';
+  osc.frequency.setValueAtTime(E4, audioCtx.currentTime);
+  osc.frequency.linearRampToValueAtTime(G4, audioCtx.currentTime + 2);
+  osc.connect(workletNode);
+  osc.start();
+
+  // Collect frames for 2.5 seconds
+  const frames = [];
+  const collectDone = new Promise((resolve) => {
+    const t = setTimeout(resolve, 2500);
+    workletNode.port.onmessage = (e) => {
+      if (e.data.type === 'tunerFrame' && e.data.dominantFrequency > 0) {
+        frames.push({
+          freq: e.data.dominantFrequency,
+          time: e.data.timestamp,
+        });
+      }
+    };
+  });
+
+  await collectDone;
+  osc.stop();
+  osc.disconnect();
+  workletNode.disconnect();
+  await audioCtx.close();
+
+  assert(frames.length > 20, `Collected enough frames (${frames.length})`,
+    `need >20 for meaningful analysis`);
+
+  if (frames.length < 10) return;
+
+  // Check early frames are near E4
+  const earlyFrames = frames.slice(0, Math.min(10, Math.floor(frames.length * 0.15)));
+  const earlyAvg = earlyFrames.reduce((s, f) => s + f.freq, 0) / earlyFrames.length;
+  assert(
+    Math.abs(earlyAvg - E4) < 30,
+    'Early frames near E4 (329.6 Hz)',
+    `avg: ${earlyAvg.toFixed(1)} Hz`
+  );
+
+  // Check late frames are near G4
+  const lateFrames = frames.slice(-Math.min(10, Math.floor(frames.length * 0.15)));
+  const lateAvg = lateFrames.reduce((s, f) => s + f.freq, 0) / lateFrames.length;
+  assert(
+    Math.abs(lateAvg - G4) < 30,
+    'Late frames near G4 (392.0 Hz)',
+    `avg: ${lateAvg.toFixed(1)} Hz`
+  );
+
+  // Check that frequency generally increases (monotonic trend)
+  let increases = 0;
+  let decreases = 0;
+  for (let i = 1; i < frames.length; i++) {
+    if (frames[i].freq > frames[i - 1].freq) increases++;
+    else if (frames[i].freq < frames[i - 1].freq) decreases++;
+  }
+  assert(
+    increases > decreases * 2,
+    'Frequency trend is upward (E→G)',
+    `increases: ${increases}, decreases: ${decreases}`
+  );
+
+  // Check full range spans at least 50 Hz (E4→G4 is ~62 Hz)
+  const minFreq = Math.min(...frames.map(f => f.freq));
+  const maxFreq = Math.max(...frames.map(f => f.freq));
+  assert(
+    maxFreq - minFreq > 40,
+    'Sweep covers >40 Hz range',
+    `min: ${minFreq.toFixed(1)}, max: ${maxFreq.toFixed(1)}, span: ${(maxFreq - minFreq).toFixed(1)} Hz`
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+window.runAllTests = async function() {
+  const btn = document.getElementById('run-btn');
+  btn.disabled = true;
+  btn.textContent = 'Running...';
+  results.innerHTML = '';
+  summaryEl.innerHTML = '';
+  passed = 0;
+  failed = 0;
+
+  await testHeaders();
+  const wasmModule = await testWasmCompilation();
+  await testWasmDSP(wasmModule);
+  await testWorkletIntegration(wasmModule);
+  await testPitchSweep(wasmModule);
+
+  summaryEl.className = failed === 0 ? 'summary-pass' : 'summary-fail';
+  summaryEl.textContent = `${passed + failed} tests: ${passed} passed, ${failed} failed`;
+  btn.textContent = 'Run Again';
+  btn.disabled = false;
+};
+
+</script>
+</body>
+</html>

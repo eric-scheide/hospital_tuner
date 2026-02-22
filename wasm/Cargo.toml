@@ -1,0 +1,38 @@
+# wasm/Cargo.toml — Rust crate manifest for the DSP WebAssembly module
+# =======================================================================
+# SKELETON FILE — values are final (no TODOs). This is a configuration file,
+# not an implementation file.
+#
+# Crate name: hospital-tuner-dsp
+# wasm-pack build command (run from project root):
+#   wasm-pack build wasm/ --target web --out-dir ../public/wasm-pkg
+#
+# Ref: /contracts/build-pipeline.md for full build context.
+# Ref: /contracts/wasm-api.md for exported API contract.
+
+[package]
+name = "hospital-tuner-dsp"
+version = "0.1.0"
+edition = "2021"
+description = "Peak-gated chroma DSP engine for the hospitalTuner browser tuner"
+
+[lib]
+# cdylib: required for wasm-pack / WebAssembly targets
+# (produces a C-compatible dynamic library, i.e. a .wasm file)
+crate-type = ["cdylib"]
+
+[dependencies]
+# wasm-bindgen: Rust ↔ JS FFI glue. Pin to exact minor version per contract.
+wasm-bindgen = "0.2.90"
+# js-sys: bindings to JS built-ins (used for any JS type interop in lib.rs)
+js-sys = "0.3.67"
+
+[profile.release]
+# Optimize for binary size (Wasm budget: < 200KB per DESIGN.md)
+opt-level = "s"
+# Link-time optimization — reduces dead code across crate boundaries
+lto = true
+# Single codegen unit maximizes LTO effectiveness
+codegen-units = 1
+# abort on panic: smaller binary; no stack unwinding needed in Wasm DSP code
+panic = "abort"
