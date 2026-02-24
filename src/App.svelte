@@ -6,7 +6,7 @@
 <script>
   import { onDestroy } from 'svelte';
   import Chromagram from './components/Chromagram.svelte';
-  import TunerStrip from './components/TunerStrip.svelte';
+
 
   // Reactive state
   let audioContext = null;
@@ -17,6 +17,7 @@
   let errorMessage = '';
   let gateRatio = 1.5;
   let harmonicSuppression = true;
+  let sensitivity = 50;
 
   // ----- Audio lifecycle -----
 
@@ -179,13 +180,10 @@
 
   <!-- Chromagram canvas (fills available space) -->
   <div class="chromagram-container">
-    <Chromagram {frame} />
+    <Chromagram {frame} {sensitivity} />
   </div>
 
-  <!-- Tuner strip -->
-  <TunerStrip {frame} />
-
-  <!-- Controls panel (only when running) -->
+<!-- Controls panel (only when running) -->
   {#if status === 'ready'}
     <div class="controls-panel">
       <label class="control-label">
@@ -200,6 +198,19 @@
           class="slider"
         />
         <span class="control-value">{gateRatio.toFixed(1)}×</span>
+      </label>
+
+      <label class="control-label">
+        <span class="control-name">Sensitivity</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          step="1"
+          bind:value={sensitivity}
+          class="slider"
+        />
+        <span class="control-value">{sensitivity}</span>
       </label>
 
       <label class="control-label">

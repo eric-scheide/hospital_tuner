@@ -10,6 +10,7 @@
   import { onMount, onDestroy } from 'svelte';
 
   export let frame = null;
+  export let sensitivity = 50; // 0–100: 0 = nothing visible, 100 = everything visible
 
   let wrapper;
   let labelCanvas;
@@ -28,6 +29,8 @@
   let logicalH = 0;
   let dpr = 1;
   let prevY = null;
+  let smoothY = null;
+  const SMOOTH = 0.35; // EMA factor: 0 = no smoothing, 1 = frozen
 
   function freqToSemitone(freq) {
     if (freq <= 0) return -1;
@@ -117,6 +120,7 @@
 
     drawFullGrid();
     prevY = null;
+    smoothY = null;
   }
 
   function drawFullGrid() {
@@ -170,13 +174,28 @@
     if (freq > 0) {
       const semi = freqToSemitone(freq);
       if (semi >= 0) {
-        const y = semitoneToY(semi);
+        const rawY = semitoneToY(semi);
+        // EMA smoothing — snap on large jumps (octave wrap), blend otherwise
+        if (smoothY === null || Math.abs(rawY - smoothY) > logicalH * 0.4) {
+          smoothY = rawY;
+        } else {
+          smoothY = SMOOTH * smoothY + (1 - SMOOTH) * rawY;
+        }
+        const y = smoothY;
+
         const pc = Math.round(semi) % 12;
         const hue = PITCH_HUES[pc];
+        const energy = f.chroma[pc];
+        // sensitivity 0 → threshold=0 (everything visible), 100 → threshold=1 (nothing visible)
+        const threshold = sensitivity / 100;
+        const rawLogE = energy > 0 ? Math.max(0, 1 + Math.log10(energy) / 2) : 0;
+        const logE = threshold < 1 && rawLogE > threshold ? (rawLogE - threshold) / (1 - threshold) : 0;
+        const sat = Math.round(100 * logE);
+        const alpha = logE;
 
         // Connect to previous point (unless it wrapped around the octave boundary)
         if (prevY !== null && Math.abs(y - prevY) < logicalH * 0.4) {
-          ctx.strokeStyle = `hsl(${hue}, 90%, 55%)`;
+          ctx.strokeStyle = `hsla(${hue}, ${sat}%, 55%, ${alpha})`;
           ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.moveTo(W - 2, prevY);
@@ -185,7 +204,7 @@
         }
 
         // Bright dot
-        ctx.fillStyle = `hsl(${hue}, 100%, 70%)`;
+        ctx.fillStyle = `hsla(${hue}, ${sat}%, 70%, ${alpha})`;
         ctx.beginPath();
         ctx.arc(W - 1, y, 1.5, 0, 2 * Math.PI);
         ctx.fill();
@@ -193,9 +212,11 @@
         prevY = y;
       } else {
         prevY = null;
+        smoothY = null;
       }
     } else {
       prevY = null;
+      smoothY = null;
     }
   }
 
