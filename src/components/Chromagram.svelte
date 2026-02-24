@@ -59,7 +59,7 @@
     const w = LABEL_W;
     const h = logicalH;
 
-    labelCtx.fillStyle = '#0a0a0a';
+    labelCtx.fillStyle = '#0c0d10';
     labelCtx.fillRect(0, 0, w, h);
 
     for (let i = 0; i < 12; i++) {
@@ -68,21 +68,21 @@
 
       // Color dot — 10% in from right edge of label column, sized to overlap neighbors
       const hue = PITCH_HUES[i];
-      const dotR = Math.max(6, h / 20); // ~60% of half-band height for overlap
+      const dotR = 5; // ~half the font height
       labelCtx.fillStyle = `hsla(${hue}, 90%, 50%, 0.6)`;
       labelCtx.beginPath();
       labelCtx.arc(w * 0.90, y, dotR, 0, 2 * Math.PI);
       labelCtx.fill();
 
       // Note name label — uniform font and color, left-aligned
-      labelCtx.fillStyle = '#bbb';
+      labelCtx.fillStyle = '#9ca0b0';
       labelCtx.font = '22px monospace';
       labelCtx.textAlign = 'left';
       labelCtx.textBaseline = 'middle';
       labelCtx.fillText(NOTE_NAMES[i], 4, y);
 
       // Grid line — uniform thickness and visibility
-      labelCtx.strokeStyle = 'rgba(255,255,255,0.30)';
+      labelCtx.strokeStyle = 'rgba(255,255,255,0.12)';
       labelCtx.lineWidth = 1;
       labelCtx.beginPath();
       labelCtx.moveTo(0, y);
@@ -118,7 +118,7 @@
     canvas.style.height = logicalH + 'px';
     ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = '#050508';
     ctx.fillRect(0, 0, logicalW, logicalH);
 
     drawFullGrid();
@@ -130,7 +130,7 @@
     if (!ctx) return;
     for (let i = 0; i < 12; i++) {
       const y = Math.round(semitoneToY(i)) + 0.5;
-      ctx.strokeStyle = 'rgba(255,255,255,0.30)';
+      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, y);
@@ -150,13 +150,13 @@
     ctx.putImageData(imgData, 0, 0);
 
     // 2. Clear rightmost column
-    ctx.fillStyle = '#000';
+    ctx.fillStyle = '#050508';
     ctx.fillRect(W - 1, 0, 1, H);
 
     // 3. Draw grid ticks on the rightmost column
     for (let i = 0; i < 12; i++) {
       const y = Math.round(semitoneToY(i));
-      ctx.fillStyle = 'rgba(255,255,255,0.30)';
+      ctx.fillStyle = 'rgba(255,255,255,0.12)';
       ctx.fillRect(W - 1, y, 1, 1);
     }
 
@@ -259,18 +259,18 @@
     inset: 0;
     display: flex;
     flex-direction: row;
-    background: #000;
+    background: #050508;
     line-height: 0;
     overflow: hidden;
   }
 
   .label-canvas {
     flex: 0 0 auto;
-    background: #0a0a0a;
+    background: #0c0d10;
   }
 
   .main-canvas {
     flex: 1 1 auto;
-    background: #000;
+    background: #050508;
   }
 </style>

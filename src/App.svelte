@@ -253,9 +253,9 @@
 <style>
   :global(body) {
     margin: 0;
-    background: #000;
-    color: #eee;
-    font-family: monospace;
+    background: #050508;
+    color: #e8eaed;
+    font-family: 'Inter', system-ui, sans-serif;
   }
 
   :global(*) {
@@ -266,8 +266,8 @@
     display: flex;
     flex-direction: column;
     height: 100vh;
-    background: #000;
-    color: #eee;
+    background: #050508;
+    color: #e8eaed;
     overflow: hidden;
   }
 
@@ -278,17 +278,19 @@
     justify-content: space-between;
     padding: 0 16px;
     height: 48px;
-    background: #0d0d0d;
-    border-bottom: 1px solid #1a1a1a;
+    background: linear-gradient(180deg, #10111a 0%, #0c0d10 100%);
+    border-bottom: 1px solid #1a1c22;
     flex-shrink: 0;
   }
 
   .app-title {
-    font-size: 16px;
-    font-weight: bold;
-    color: #ddd;
-    letter-spacing: 0.05em;
+    font-size: 15px;
+    font-weight: 600;
+    color: #e8eaed;
+    letter-spacing: 0.12em;
     text-transform: uppercase;
+    padding-left: 12px;
+    border-left: 2px solid #34d399;
   }
 
   .header-controls {
@@ -299,12 +301,13 @@
   .btn {
     padding: 6px 18px;
     border: none;
-    border-radius: 4px;
-    font-family: monospace;
-    font-size: 13px;
-    font-weight: bold;
+    border-radius: 6px;
+    font-family: 'Inter', sans-serif;
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
     cursor: pointer;
-    transition: opacity 0.1s;
+    transition: background 0.15s ease, transform 0.1s ease;
   }
 
   .btn:disabled {
@@ -312,13 +315,22 @@
     cursor: default;
   }
 
+  .btn:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  .btn:focus-visible {
+    outline: 2px solid rgba(52, 211, 153, 0.4);
+    outline-offset: 4px;
+  }
+
   .btn-start {
-    background: #22c55e;
+    background: #10b981;
     color: #000;
   }
 
   .btn-start:not(:disabled):hover {
-    background: #16a34a;
+    background: #059669;
   }
 
   .btn-stop {
@@ -338,9 +350,9 @@
     flex-shrink: 0;
   }
 
-  .status-idle    { color: #555; }
+  .status-idle    { color: #4a4e5a; }
   .status-loading { color: #facc15; }
-  .status-running { color: #4ade80; }
+  .status-running { color: #34d399; }
   .status-error   { color: #f87171; }
 
   /* Chromagram area */
@@ -349,7 +361,7 @@
     position: relative;
     min-height: 0;
     overflow: hidden;
-    background: #000;
+    background: #050508;
   }
 
   /* Controls panel */
@@ -358,8 +370,8 @@
     gap: 24px;
     align-items: center;
     padding: 8px 16px;
-    background: #0a0a0a;
-    border-top: 1px solid #1a1a1a;
+    background: linear-gradient(0deg, #0a0b0e 0%, #0c0d10 100%);
+    border-top: 1px solid #1a1c22;
     flex-shrink: 0;
   }
 
@@ -368,18 +380,30 @@
     align-items: center;
     gap: 8px;
     font-size: 12px;
-    color: #999;
+    color: #8b8fa3;
     cursor: pointer;
     user-select: none;
   }
 
+  .control-label:last-child {
+    border-left: 1px solid #1a1c22;
+    padding-left: 16px;
+  }
+
   .control-name {
     min-width: 110px;
+    font-weight: 500;
+    text-transform: uppercase;
+    font-size: 10px;
+    letter-spacing: 0.06em;
+    color: #6b7080;
   }
 
   .control-value {
     min-width: 36px;
-    color: #ccc;
+    color: #c4c7d0;
+    font-family: 'SF Mono', 'Cascadia Code', monospace;
+    font-size: 11px;
   }
 
   .slider {
@@ -388,9 +412,14 @@
     width: 120px;
     height: 4px;
     border-radius: 2px;
-    background: #333;
+    background: #1a1c22;
     outline: none;
     cursor: pointer;
+  }
+
+  .slider:focus-visible {
+    outline: 2px solid rgba(52, 211, 153, 0.4);
+    outline-offset: 4px;
   }
 
   .slider::-webkit-slider-thumb {
@@ -399,21 +428,29 @@
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #4ade80;
+    background: #34d399;
     cursor: pointer;
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.3);
+    transition: transform 0.1s ease, box-shadow 0.1s ease;
+  }
+
+  .slider::-webkit-slider-thumb:hover {
+    transform: scale(1.15);
+    box-shadow: 0 0 10px rgba(52, 211, 153, 0.5);
   }
 
   .slider::-moz-range-thumb {
     width: 14px;
     height: 14px;
     border-radius: 50%;
-    background: #4ade80;
+    background: #34d399;
     cursor: pointer;
     border: none;
+    box-shadow: 0 0 6px rgba(52, 211, 153, 0.3);
   }
 
   .checkbox {
-    accent-color: #4ade80;
+    accent-color: #34d399;
     width: 16px;
     height: 16px;
     cursor: pointer;
