@@ -28,6 +28,7 @@
   let harmonicSuppression = true;
   let sensitivity = 90;
   let minDuration = 15;
+  let smoothness = 0.385;
 
   // ----- Audio lifecycle -----
 
@@ -190,24 +191,23 @@
 
   <!-- Chromagram canvas (fills available space) -->
   <div class="chromagram-container">
-    <Chromagram {frame} {sensitivity} {minDuration} />
+    <Chromagram {frame} {sensitivity} {minDuration} {smoothness} />
   </div>
 
 <!-- Controls panel (only when running) -->
   {#if status === 'ready'}
     <div class="controls-panel">
       <label class="control-label">
-        <span class="control-name">Gate ratio</span>
+        <span class="control-name">Smoothness</span>
         <input
           type="range"
           min="0"
-          max="100"
-          step="1"
-          bind:value={gateSlider}
-          on:input={onGateRatioChange}
+          max="0.8"
+          step="0.01"
+          bind:value={smoothness}
           class="slider"
         />
-        <span class="control-value">{gateRatio.toFixed(1)}×</span>
+        <span class="control-value">{(smoothness * 100).toFixed(0)}%</span>
       </label>
 
       <label class="control-label">

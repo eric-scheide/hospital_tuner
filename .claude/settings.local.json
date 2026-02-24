@@ -6,7 +6,9 @@
       "Bash(npm run build:wasm:*)",
       "Bash(git -C /Users/eric/hospitalTuner status)",
       "Bash(git -C /Users/eric/hospitalTuner add -A)",
-      "Bash(git -C:*)"
+      "Bash(git -C:*)",
+      "Bash(git checkout -- src/components/Chromagram.svelte)",
+      "Bash(npx vite build 2>&1 | tail -3)"
     ]
   }
 }

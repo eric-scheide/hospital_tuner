@@ -12,6 +12,7 @@
   export let frame = null;
   export let sensitivity = 50; // 0–100: 0 = nothing visible, 100 = everything visible
   export let minDuration = 15; // ms pitch must be continuous before plotting
+  export let smoothness = 0.385; // EMA factor: 0 = no smoothing, 1 = frozen
 
   let wrapper;
   let labelCanvas;
@@ -31,7 +32,7 @@
   let dpr = 1;
   let prevY = null;
   let smoothY = null;
-  const SMOOTH = 0.35; // EMA factor: 0 = no smoothing, 1 = frozen
+  $: SMOOTH = smoothness;
   $: MIN_DURATION_MS = minDuration; // pitch must be continuous this long before plotting
   let pitchOnsetMs = null;   // timestamp when current pitch class started
   let prevPc = null;         // previous pitch class (for continuity check)
@@ -65,24 +66,20 @@
       const y = Math.round(semitoneToY(i)) + 0.5;
       const isNatural = NATURALS.has(i);
 
-      // Color dot — 10% in from right edge of label column
+      // Color dot — 10% in from right edge of label column, sized to overlap neighbors
       const hue = PITCH_HUES[i];
+      const dotR = Math.max(6, h / 20); // ~60% of half-band height for overlap
       labelCtx.fillStyle = `hsla(${hue}, 90%, 50%, 0.6)`;
       labelCtx.beginPath();
-      labelCtx.arc(w * 0.90, y, 3, 0, 2 * Math.PI);
+      labelCtx.arc(w * 0.90, y, dotR, 0, 2 * Math.PI);
       labelCtx.fill();
 
-      // Note name label — 2x bigger fonts
-      if (isNatural) {
-        labelCtx.fillStyle = i === 0 ? '#ddd' : '#999';
-        labelCtx.font = i === 0 ? 'bold 24px monospace' : '22px monospace';
-      } else {
-        labelCtx.fillStyle = '#666';
-        labelCtx.font = '20px monospace';
-      }
-      labelCtx.textAlign = 'right';
+      // Note name label — uniform font and color, left-aligned
+      labelCtx.fillStyle = '#bbb';
+      labelCtx.font = '22px monospace';
+      labelCtx.textAlign = 'left';
       labelCtx.textBaseline = 'middle';
-      labelCtx.fillText(NOTE_NAMES[i], w * 0.82, y);
+      labelCtx.fillText(NOTE_NAMES[i], 4, y);
 
       // Grid line — uniform thickness and visibility
       labelCtx.strokeStyle = 'rgba(255,255,255,0.30)';
