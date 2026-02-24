@@ -11,6 +11,7 @@
 
   export let frame = null;
   export let sensitivity = 50; // 0–100: 0 = nothing visible, 100 = everything visible
+  export let minDuration = 15; // ms pitch must be continuous before plotting
 
   let wrapper;
   let labelCanvas;
@@ -18,7 +19,7 @@
   let canvas;
   let ctx;
 
-  const LABEL_W = 40;
+  const LABEL_W = 60;
   // Y-axis spans exactly one octave: 12 semitones
   // semitone 0 = C (bottom), semitone 12 = C (top, wraps)
   const NOTE_NAMES = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
@@ -31,6 +32,9 @@
   let prevY = null;
   let smoothY = null;
   const SMOOTH = 0.35; // EMA factor: 0 = no smoothing, 1 = frozen
+  $: MIN_DURATION_MS = minDuration; // pitch must be continuous this long before plotting
+  let pitchOnsetMs = null;   // timestamp when current pitch class started
+  let prevPc = null;         // previous pitch class (for continuity check)
 
   function freqToSemitone(freq) {
     if (freq <= 0) return -1;
@@ -42,10 +46,11 @@
     return semi;
   }
 
+  const Y_PAD = 0.04; // fraction of height reserved at top/bottom so edge notes aren't clipped
   function semitoneToY(semi) {
-    // C (0) at bottom, B (11) at top
-    // Add 0.5 offset so note lines sit in the center of their band
-    return logicalH * (1 - semi / 12);
+    // C (0) at bottom, B (11) at top, with padding so all notes are visible
+    const usable = 1 - 2 * Y_PAD;
+    return logicalH * (Y_PAD + usable * (1 - semi / 12));
   }
 
   function drawLabels() {
@@ -60,26 +65,27 @@
       const y = Math.round(semitoneToY(i)) + 0.5;
       const isNatural = NATURALS.has(i);
 
-      // Note name label
+      // Color dot — 10% in from right edge of label column
+      const hue = PITCH_HUES[i];
+      labelCtx.fillStyle = `hsla(${hue}, 90%, 50%, 0.6)`;
+      labelCtx.beginPath();
+      labelCtx.arc(w * 0.90, y, 3, 0, 2 * Math.PI);
+      labelCtx.fill();
+
+      // Note name label — 2x bigger fonts
       if (isNatural) {
-        labelCtx.fillStyle = i === 0 ? '#bbb' : '#777';
-        labelCtx.font = i === 0 ? 'bold 12px monospace' : '11px monospace';
+        labelCtx.fillStyle = i === 0 ? '#ddd' : '#999';
+        labelCtx.font = i === 0 ? 'bold 24px monospace' : '22px monospace';
       } else {
-        labelCtx.fillStyle = '#444';
-        labelCtx.font = '9px monospace';
+        labelCtx.fillStyle = '#666';
+        labelCtx.font = '20px monospace';
       }
       labelCtx.textAlign = 'right';
       labelCtx.textBaseline = 'middle';
-      labelCtx.fillText(NOTE_NAMES[i], w - 6, y);
+      labelCtx.fillText(NOTE_NAMES[i], w * 0.82, y);
 
-      // Grid line
-      if (i === 0) {
-        labelCtx.strokeStyle = 'rgba(255,255,255,0.3)';
-      } else if (isNatural) {
-        labelCtx.strokeStyle = 'rgba(255,255,255,0.15)';
-      } else {
-        labelCtx.strokeStyle = 'rgba(255,255,255,0.06)';
-      }
+      // Grid line — uniform thickness and visibility
+      labelCtx.strokeStyle = 'rgba(255,255,255,0.30)';
       labelCtx.lineWidth = 1;
       labelCtx.beginPath();
       labelCtx.moveTo(0, y);
@@ -127,13 +133,7 @@
     if (!ctx) return;
     for (let i = 0; i < 12; i++) {
       const y = Math.round(semitoneToY(i)) + 0.5;
-      if (i === 0) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.25)';
-      } else if (NATURALS.has(i)) {
-        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
-      } else {
-        ctx.strokeStyle = 'rgba(255,255,255,0.04)';
-      }
+      ctx.strokeStyle = 'rgba(255,255,255,0.30)';
       ctx.lineWidth = 1;
       ctx.beginPath();
       ctx.moveTo(0, y);
@@ -159,21 +159,29 @@
     // 3. Draw grid ticks on the rightmost column
     for (let i = 0; i < 12; i++) {
       const y = Math.round(semitoneToY(i));
-      if (i === 0) {
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
-      } else if (NATURALS.has(i)) {
-        ctx.fillStyle = 'rgba(255,255,255,0.1)';
-      } else {
-        ctx.fillStyle = 'rgba(255,255,255,0.04)';
-      }
+      ctx.fillStyle = 'rgba(255,255,255,0.30)';
       ctx.fillRect(W - 1, y, 1, 1);
     }
 
     // 4. Plot the dominant frequency (octave-folded)
     const freq = f.dominantFrequency;
+    const now = f.timestamp ?? performance.now();
     if (freq > 0) {
       const semi = freqToSemitone(freq);
       if (semi >= 0) {
+        const pc = Math.round(semi) % 12;
+
+        // Track pitch continuity — reset onset and break the trace when pitch class changes
+        if (pc !== prevPc) {
+          pitchOnsetMs = now;
+          prevPc = pc;
+          prevY = null;
+          smoothY = null;
+        }
+
+        // Gate: don't plot until pitch has been continuous for MIN_DURATION_MS
+        if (now - pitchOnsetMs < MIN_DURATION_MS) return;
+
         const rawY = semitoneToY(semi);
         // EMA smoothing — snap on large jumps (octave wrap), blend otherwise
         if (smoothY === null || Math.abs(rawY - smoothY) > logicalH * 0.4) {
@@ -183,40 +191,48 @@
         }
         const y = smoothY;
 
-        const pc = Math.round(semi) % 12;
         const hue = PITCH_HUES[pc];
         const energy = f.chroma[pc];
         // sensitivity 0 → threshold=0 (everything visible), 100 → threshold=1 (nothing visible)
         const threshold = sensitivity / 100;
         const rawLogE = energy > 0 ? Math.max(0, 1 + Math.log10(energy) / 2) : 0;
         const logE = threshold < 1 && rawLogE > threshold ? (rawLogE - threshold) / (1 - threshold) : 0;
-        const sat = Math.round(100 * logE);
         const alpha = logE;
 
         // Connect to previous point (unless it wrapped around the octave boundary)
         if (prevY !== null && Math.abs(y - prevY) < logicalH * 0.4) {
-          ctx.strokeStyle = `hsla(${hue}, ${sat}%, 55%, ${alpha})`;
-          ctx.lineWidth = 2;
+          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha})`;
+          ctx.lineWidth = 3;
           ctx.beginPath();
           ctx.moveTo(W - 2, prevY);
           ctx.lineTo(W - 1, y);
           ctx.stroke();
         }
 
-        // Bright dot
-        ctx.fillStyle = `hsla(${hue}, ${sat}%, 70%, ${alpha})`;
+        // Glow halo
+        ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.4})`;
         ctx.beginPath();
-        ctx.arc(W - 1, y, 1.5, 0, 2 * Math.PI);
+        ctx.arc(W - 1, y, 5, 0, 2 * Math.PI);
+        ctx.fill();
+
+        // Core dot
+        ctx.fillStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
+        ctx.beginPath();
+        ctx.arc(W - 1, y, 2.5, 0, 2 * Math.PI);
         ctx.fill();
 
         prevY = y;
       } else {
         prevY = null;
         smoothY = null;
+        prevPc = null;
+        pitchOnsetMs = null;
       }
     } else {
       prevY = null;
       smoothY = null;
+      prevPc = null;
+      pitchOnsetMs = null;
     }
   }
 

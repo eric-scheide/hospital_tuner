@@ -223,9 +223,9 @@ impl TunerProcessor {
     }
 
     /// Set the spectral gate ratio.
-    /// Default 1.5.  Clamped silently to [0.5, 10.0].
+    /// Default 1.5.  Clamped silently to [0.0, 15.0].
     pub fn set_gate_ratio(&mut self, ratio: f32) {
-        self.gate_ratio = ratio.clamp(0.5, 10.0);
+        self.gate_ratio = ratio.clamp(0.0, 15.0);
     }
 
     /// Set the chroma presence threshold.
@@ -359,10 +359,10 @@ mod tests {
     #[test]
     fn set_gate_ratio_clamps() {
         let mut tp = TunerProcessor::new(44100.0);
-        tp.set_gate_ratio(0.0); // below min → 0.5
-        assert!((tp.gate_ratio - 0.5).abs() < 1e-6);
-        tp.set_gate_ratio(999.0); // above max → 10.0
-        assert!((tp.gate_ratio - 10.0).abs() < 1e-6);
+        tp.set_gate_ratio(-1.0); // below min → 0.0
+        assert!((tp.gate_ratio - 0.0).abs() < 1e-6);
+        tp.set_gate_ratio(999.0); // above max → 15.0
+        assert!((tp.gate_ratio - 15.0).abs() < 1e-6);
         tp.set_gate_ratio(3.0); // valid
         assert!((tp.gate_ratio - 3.0).abs() < 1e-6);
     }

@@ -15,9 +15,19 @@
   let frame = null;
   let status = 'idle'; // 'idle' | 'loading' | 'ready' | 'error'
   let errorMessage = '';
-  let gateRatio = 1.5;
+  let gateSlider = 39; // 0–100 linear slider position
+  // Exponential mapping: slider 0 → 0, slider 100 → 15
+  // f(x) = 15 * ((e^(x/100*k) - 1) / (e^k - 1)), k controls curvature
+  const GATE_K = 3;
+  const GATE_MAX = 15;
+  function sliderToGate(s) {
+    if (s <= 0) return 0;
+    return GATE_MAX * (Math.exp(GATE_K * s / 100) - 1) / (Math.exp(GATE_K) - 1);
+  }
+  $: gateRatio = sliderToGate(gateSlider);
   let harmonicSuppression = true;
-  let sensitivity = 50;
+  let sensitivity = 90;
+  let minDuration = 15;
 
   // ----- Audio lifecycle -----
 
@@ -180,7 +190,7 @@
 
   <!-- Chromagram canvas (fills available space) -->
   <div class="chromagram-container">
-    <Chromagram {frame} {sensitivity} />
+    <Chromagram {frame} {sensitivity} {minDuration} />
   </div>
 
 <!-- Controls panel (only when running) -->
@@ -190,11 +200,11 @@
         <span class="control-name">Gate ratio</span>
         <input
           type="range"
-          min="0.5"
-          max="5"
-          step="0.1"
-          bind:value={gateRatio}
-          on:change={onGateRatioChange}
+          min="0"
+          max="100"
+          step="1"
+          bind:value={gateSlider}
+          on:input={onGateRatioChange}
           class="slider"
         />
         <span class="control-value">{gateRatio.toFixed(1)}×</span>
@@ -204,13 +214,26 @@
         <span class="control-name">Sensitivity</span>
         <input
           type="range"
-          min="0"
+          min="90"
           max="100"
-          step="1"
+          step="0.5"
           bind:value={sensitivity}
           class="slider"
         />
         <span class="control-value">{sensitivity}</span>
+      </label>
+
+      <label class="control-label">
+        <span class="control-name">Min duration</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          step="5"
+          bind:value={minDuration}
+          class="slider"
+        />
+        <span class="control-value">{minDuration} ms</span>
       </label>
 
       <label class="control-label">
