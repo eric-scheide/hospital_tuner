@@ -44,6 +44,9 @@
     // Fold into 0..12 range (one octave). Use modulo to wrap.
     let semi = midi % 12;
     if (semi < 0) semi += 12;
+    // Fix octave-boundary discontinuity: values > 11.5 are "almost C",
+    // so map them to negative (e.g. 11.9 → -0.1) for display continuity.
+    if (semi > 11.5) semi -= 12;
     return semi;
   }
 
@@ -165,8 +168,9 @@
     const now = f.timestamp ?? performance.now();
     if (freq > 0) {
       const semi = freqToSemitone(freq);
-      if (semi >= 0) {
-        const pc = Math.round(semi) % 12;
+      if (semi >= -0.5) {
+        let pc = Math.round(semi) % 12;
+        if (pc < 0) pc += 12;
 
         // Track pitch continuity — reset onset and break the trace when pitch class changes
         if (pc !== prevPc) {
@@ -190,8 +194,8 @@
 
         const hue = PITCH_HUES[pc];
         const energy = f.chroma[pc];
-        // sensitivity 0 → threshold=0 (everything visible), 100 → threshold=1 (nothing visible)
-        const threshold = sensitivity / 100;
+        // sensitivity 0 → threshold=1 (nothing visible), 100 → threshold=0 (everything visible)
+        const threshold = (100 - sensitivity) / 100;
         const rawLogE = energy > 0 ? Math.max(0, 1 + Math.log10(energy) / 2) : 0;
         const logE = threshold < 1 && rawLogE > threshold ? (rawLogE - threshold) / (1 - threshold) : 0;
         const alpha = logE;

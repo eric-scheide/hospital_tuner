@@ -17,12 +17,12 @@
 // Constants
 // ---------------------------------------------------------------------------
 
-pub const FFT_SIZE: usize = 4096;
-pub const HOP_SIZE: usize = 512;
+pub const FFT_SIZE: usize = 8192;
+pub const HOP_SIZE: usize = 1024;
 pub const SAMPLE_RATE: f32 = 44100.0;
 pub const A4_HZ: f32 = 440.0;
 pub const A4_MIDI: f32 = 69.0;
-pub const MIN_FREQ: f32 = 55.0;   // A1 — lowest note we care about
+pub const MIN_FREQ: f32 = 27.0;   // A0 — lowest note on a piano
 pub const MAX_FREQ: f32 = 4186.0; // C8 — highest note we care about
 pub const PRESENCE_THRESHOLD: f32 = 0.4;
 pub const DEFAULT_GATE_RATIO: f32 = 1.5;
@@ -163,16 +163,19 @@ pub fn estimate_noise_floor(spectrum: &[f32], ema: &mut Vec<f32>, alpha: f32) {
 
 /// Spectral whitening: divide each bin by its local mean.
 ///
-/// For each bin `i`, `local_mean` is the arithmetic mean of all bins in the
-/// window `[i − window_radius, i + window_radius]`, clamped to valid indices.
+/// Uses a frequency-proportional window: for each bin, the window radius is
+/// `max(3, round(bin * 0.15))` — approximately 15% of the bin index.
+/// At low bins (bass), the window is small (preserving narrow peaks); at high
+/// bins, the window is larger (effective broadband whitening).
 ///
 /// Returns `spectrum[i] / (local_mean + 1e-9)` to prevent division by zero.
-/// `window_radius` = 10 bins (≈±108 Hz at 44100/4096 Hz/bin).
-pub fn whiten_spectrum(spectrum: &[f32], window_radius: usize) -> Vec<f32> {
+pub fn whiten_spectrum(spectrum: &[f32], sample_rate: f32, fft_size: usize) -> Vec<f32> {
+    let _ = (sample_rate, fft_size); // reserved for future use; window scales by bin index
     let n = spectrum.len();
     let mut out = Vec::with_capacity(n);
 
     for i in 0..n {
+        let window_radius = 3usize.max((i as f32 * 0.15).round() as usize);
         let lo = if i >= window_radius { i - window_radius } else { 0 };
         let hi = (i + window_radius + 1).min(n); // exclusive
         let count = (hi - lo) as f32;
@@ -250,28 +253,22 @@ pub fn pick_peaks(gated: &[f32], sample_rate: f32, fft_size: usize) -> Vec<(usiz
 ///   2. For each peak `p`, check harmonic ratios 2..=6.
 ///   3. For each ratio `r`, compute the expected harmonic bin
 ///      `expected = p.bin * r`.
-///   4. If any weaker peak `q` lies within ±2 bins of `expected`, multiply
-///      `q.magnitude` by 0.5 (−6 dB).
+///   4. If any weaker peak `q` lies within a frequency-adaptive tolerance of
+///      `expected`, multiply `q.magnitude` by 0.5 (−6 dB).
+///      Tolerance = `max(1, round(expected * 0.02))` — 2% of the expected bin,
+///      giving tight tolerance at low frequencies and looser at high.
 ///
 /// This is O(n²) over peaks; in practice there are < 20 peaks per frame.
-/// Note: `sample_rate` and `fft_size` are accepted to match the call-site
-/// signature (documented in the contract); harmonic relationships are detected
-/// purely by bin-index arithmetic and do not require a Hz conversion.
-pub fn suppress_harmonics(
-    peaks: &mut Vec<(usize, f32)>,
-    _sample_rate: f32,
-    _fft_size: f32,
-) {
+pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>) {
     // Sort descending by magnitude (strongest first).
     peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
 
     let n = peaks.len();
-    // We iterate over all (p, q) pairs where p is stronger than q.
-    // Because we sorted descending, for index p_idx < q_idx, peaks[p_idx] >= peaks[q_idx].
     for p_idx in 0..n {
         let p_bin = peaks[p_idx].0;
         for r in 2usize..=6 {
             let expected = p_bin * r;
+            let tolerance = 1usize.max((expected as f32 * 0.02).round() as usize);
             for q_idx in (p_idx + 1)..n {
                 let q_bin = peaks[q_idx].0;
                 let diff = if q_bin >= expected {
@@ -279,7 +276,7 @@ pub fn suppress_harmonics(
                 } else {
                     expected - q_bin
                 };
-                if diff <= 2 {
+                if diff <= tolerance {
                     peaks[q_idx].1 *= 0.5;
                 }
             }
@@ -554,7 +551,7 @@ mod tests {
     fn suppress_harmonics_attenuates_overtones() {
         // Fundamental at bin 40, harmonic at bin 80 (2x)
         let mut peaks = vec![(40usize, 1.0f32), (80usize, 0.8f32)];
-        suppress_harmonics(&mut peaks, SAMPLE_RATE, FFT_SIZE as f32);
+        suppress_harmonics(&mut peaks);
 
         // Find the peak at bin 80 after suppression
         let harmonic_mag = peaks
@@ -577,7 +574,7 @@ mod tests {
         // A flat spectrum of constant value c → local_mean = c → output = c/(c+eps) ≈ 1.0
         let n = 64;
         let spectrum = vec![2.0f32; n];
-        let whitened = whiten_spectrum(&spectrum, 10);
+        let whitened = whiten_spectrum(&spectrum, SAMPLE_RATE, FFT_SIZE);
         assert_eq!(whitened.len(), n);
         for &v in &whitened {
             assert!((v - 1.0).abs() < 0.01, "flat spectrum should whiten to ~1.0, got {}", v);

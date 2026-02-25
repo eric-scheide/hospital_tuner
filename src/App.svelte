@@ -26,7 +26,7 @@
   }
   $: gateRatio = sliderToGate(gateSlider);
   let harmonicSuppression = true;
-  let sensitivity = 90;
+  let sensitivity = 10;
   let minDuration = 15;
   let smoothness = 0.385;
 
@@ -214,9 +214,9 @@
         <span class="control-name">Sensitivity</span>
         <input
           type="range"
-          min="90"
+          min="0"
           max="100"
-          step="0.5"
+          step="1"
           bind:value={sensitivity}
           class="slider"
         />

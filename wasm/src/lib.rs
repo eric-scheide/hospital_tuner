@@ -185,7 +185,7 @@ impl TunerProcessor {
         estimate_noise_floor(&spectrum, &mut self.noise_floor_ema, 0.1);
 
         // Step 7 — spectrally whiten (flatten broadband tilt).
-        let mut whitened = whiten_spectrum(&spectrum, 10);
+        let mut whitened = whiten_spectrum(&spectrum, self.sample_rate, FFT_SIZE);
 
         // Step 8 — gate: zero bins where raw < ema * gate_ratio.
         apply_gate(&mut whitened, &spectrum, &self.noise_floor_ema, self.gate_ratio);
@@ -195,7 +195,7 @@ impl TunerProcessor {
 
         // Step 10 — optionally suppress harmonic overtones.
         if self.harmonic_suppression {
-            suppress_harmonics(&mut peaks, self.sample_rate, FFT_SIZE as f32);
+            suppress_harmonics(&mut peaks);
         }
 
         // Step 11 — map peaks to 12-bin chroma vector.
@@ -267,7 +267,7 @@ mod tests {
     // -----------------------------------------------------------------------
     #[test]
     fn hann_window_shape() {
-        let size = 4096;
+        let size = FS;
         let w = hw(size);
         assert_eq!(w.len(), size, "window must have exactly size elements");
 
