@@ -13,10 +13,13 @@
   export let sensitivity = 50; // 0–100: 0 = nothing visible, 100 = everything visible
   export let minDuration = 15; // ms pitch must be continuous before plotting
   export let smoothness = 0.385; // EMA factor: 0 = no smoothing, 1 = frozen
+  export let scrollSpeed = 2.0; // pixels per frame
 
   let wrapper;
   let labelCanvas;
   let labelCtx;
+  let gridCanvas;
+  let gridCtx;
   let canvas;
   let ctx;
 
@@ -36,6 +39,7 @@
   $: MIN_DURATION_MS = minDuration; // pitch must be continuous this long before plotting
   let pitchOnsetMs = null;   // timestamp when current pitch class started
   let prevPc = null;         // previous pitch class (for continuity check)
+  let scrollAccum = 0;       // fractional pixel accumulator for smooth scroll speed
 
   function freqToSemitone(freq) {
     if (freq <= 0) return -1;
@@ -50,11 +54,12 @@
     return semi;
   }
 
-  const Y_PAD = 0.04; // fraction of height reserved at top/bottom so edge notes aren't clipped
+  const Y_PAD_TOP = 0.005; // minimal top padding
+  const Y_PAD_BOT = 0.07; // generous space below C
   function semitoneToY(semi) {
-    // C (0) at bottom, B (11) at top, with padding so all notes are visible
-    const usable = 1 - 2 * Y_PAD;
-    return logicalH * (Y_PAD + usable * (1 - semi / 12));
+    // C (0) at bottom, B (11) at top, with asymmetric padding
+    const usable = 1 - Y_PAD_TOP - Y_PAD_BOT;
+    return logicalH * (Y_PAD_TOP + usable * (1 - semi / 12));
   }
 
   function drawLabels() {
@@ -84,18 +89,11 @@
       labelCtx.textBaseline = 'middle';
       labelCtx.fillText(NOTE_NAMES[i], 4, y);
 
-      // Grid line — uniform thickness and visibility
-      labelCtx.strokeStyle = 'rgba(255,255,255,0.12)';
-      labelCtx.lineWidth = 1;
-      labelCtx.beginPath();
-      labelCtx.moveTo(0, y);
-      labelCtx.lineTo(w, y);
-      labelCtx.stroke();
     }
   }
 
   function sizeCanvases() {
-    if (!wrapper || !canvas || !labelCanvas) return;
+    if (!wrapper || !canvas || !labelCanvas || !gridCanvas) return;
 
     const rect = wrapper.getBoundingClientRect();
     const totalW = Math.floor(rect.width);
@@ -114,31 +112,37 @@
     labelCtx.scale(dpr, dpr);
     drawLabels();
 
-    // Main scrolling canvas
+    // Static grid canvas (behind trace)
+    gridCanvas.width = logicalW * dpr;
+    gridCanvas.height = logicalH * dpr;
+    gridCanvas.style.width = logicalW + 'px';
+    gridCanvas.style.height = logicalH + 'px';
+    gridCtx = gridCanvas.getContext('2d');
+    gridCtx.scale(dpr, dpr);
+    drawFullGrid();
+
+    // Trace canvas (transparent background, on top of grid)
     canvas.width = logicalW * dpr;
     canvas.height = logicalH * dpr;
     canvas.style.width = logicalW + 'px';
     canvas.style.height = logicalH + 'px';
     ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
-    ctx.fillStyle = '#050508';
-    ctx.fillRect(0, 0, logicalW, logicalH);
 
-    drawFullGrid();
     prevY = null;
     smoothY = null;
   }
 
   function drawFullGrid() {
-    if (!ctx) return;
+    if (!gridCtx) return;
     for (let i = 0; i < 12; i++) {
       const y = Math.round(semitoneToY(i)) + 0.5;
-      ctx.strokeStyle = 'rgba(255,255,255,0.12)';
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.moveTo(0, y);
-      ctx.lineTo(logicalW, y);
-      ctx.stroke();
+      gridCtx.strokeStyle = 'rgba(255,255,255,0.35)';
+      gridCtx.lineWidth = 1.5;
+      gridCtx.beginPath();
+      gridCtx.moveTo(0, y);
+      gridCtx.lineTo(logicalW, y);
+      gridCtx.stroke();
     }
   }
 
@@ -147,23 +151,19 @@
 
     const W = logicalW;
     const H = logicalH;
+    const HX = W - 11; // trace head 10px inset from right edge
 
-    // 1. Shift content left by 1px
-    const imgData = ctx.getImageData(dpr, 0, (W - 1) * dpr, H * dpr);
-    ctx.putImageData(imgData, 0, 0);
-
-    // 2. Clear rightmost column
-    ctx.fillStyle = '#050508';
-    ctx.fillRect(W - 1, 0, 1, H);
-
-    // 3. Draw grid ticks on the rightmost column
-    for (let i = 0; i < 12; i++) {
-      const y = Math.round(semitoneToY(i));
-      ctx.fillStyle = 'rgba(255,255,255,0.12)';
-      ctx.fillRect(W - 1, y, 1, 1);
+    // 1. Shift trail content left (fractional speed via accumulator)
+    scrollAccum += scrollSpeed;
+    const shift = Math.floor(scrollAccum);
+    scrollAccum -= shift;
+    if (shift > 0) {
+      const imgData = ctx.getImageData(shift * dpr, 0, (HX - shift) * dpr, H * dpr);
+      ctx.clearRect(0, 0, W, H);
+      ctx.putImageData(imgData, 0, 0);
     }
 
-    // 4. Plot the dominant frequency (octave-folded)
+    // 3. Plot the dominant frequency (octave-folded)
     const freq = f.dominantFrequency;
     const now = f.timestamp ?? performance.now();
     if (freq > 0) {
@@ -202,24 +202,53 @@
 
         // Connect to previous point (unless it wrapped around the octave boundary)
         if (prevY !== null && Math.abs(y - prevY) < logicalH * 0.4) {
-          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha})`;
-          ctx.lineWidth = 3;
+          // Outer glow — wide transparent fringe
+          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.1})`;
+          ctx.lineWidth = 14;
+          ctx.lineCap = 'round';
           ctx.beginPath();
-          ctx.moveTo(W - 2, prevY);
-          ctx.lineTo(W - 1, y);
+          ctx.moveTo(HX - shift, prevY);
+          ctx.lineTo(HX, y);
+          ctx.stroke();
+
+          // Mid glow
+          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.3})`;
+          ctx.lineWidth = 8;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(HX - shift, prevY);
+          ctx.lineTo(HX, y);
+          ctx.stroke();
+
+          // Inner glow
+          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.6})`;
+          ctx.lineWidth = 4;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(HX - shift, prevY);
+          ctx.lineTo(HX, y);
+          ctx.stroke();
+
+          // Core stroke — bright center
+          ctx.strokeStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
+          ctx.lineWidth = 1.5;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(HX - shift, prevY);
+          ctx.lineTo(HX, y);
           ctx.stroke();
         }
 
-        // Glow halo
-        ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.4})`;
+        // Glow halo — wide soft dot
+        ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.12})`;
         ctx.beginPath();
-        ctx.arc(W - 1, y, 5, 0, 2 * Math.PI);
+        ctx.arc(HX, y, 10, 0, 2 * Math.PI);
         ctx.fill();
 
         // Core dot
         ctx.fillStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
         ctx.beginPath();
-        ctx.arc(W - 1, y, 2.5, 0, 2 * Math.PI);
+        ctx.arc(HX, y, 2.5, 0, 2 * Math.PI);
         ctx.fill();
 
         prevY = y;
@@ -254,7 +283,10 @@
 
 <div class="pitch-tracker" bind:this={wrapper}>
   <canvas class="label-canvas" bind:this={labelCanvas}></canvas>
-  <canvas class="main-canvas" bind:this={canvas}></canvas>
+  <div class="canvas-stack">
+    <canvas class="grid-canvas" bind:this={gridCanvas}></canvas>
+    <canvas class="trace-canvas" bind:this={canvas}></canvas>
+  </div>
 </div>
 
 <style>
@@ -273,8 +305,19 @@
     background: #0c0d10;
   }
 
-  .main-canvas {
+  .canvas-stack {
     flex: 1 1 auto;
+    position: relative;
     background: #050508;
+  }
+
+  .grid-canvas {
+    position: absolute;
+    inset: 0;
+  }
+
+  .trace-canvas {
+    position: absolute;
+    inset: 0;
   }
 </style>

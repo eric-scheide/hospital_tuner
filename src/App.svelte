@@ -29,6 +29,19 @@
   let sensitivity = 10;
   let minDuration = 15;
   let smoothness = 0.385;
+  let scrollSpeed = 2.0;
+  let gearOpen = false;
+
+  function toggleGear() {
+    gearOpen = !gearOpen;
+  }
+
+  function closeGear(e) {
+    // Close when clicking outside the gear menu
+    if (gearOpen && !e.target.closest('.gear-wrapper')) {
+      gearOpen = false;
+    }
+  }
 
   // ----- Audio lifecycle -----
 
@@ -163,11 +176,48 @@
   <title>Hospital Tuner</title>
 </svelte:head>
 
+<svelte:window on:click={closeGear} />
 <div class="app">
   <!-- Header bar -->
   <header class="app-header">
     <span class="app-title">Hospital Tuner</span>
     <div class="header-controls">
+      <div class="gear-wrapper">
+          <button class="btn btn-gear" on:click={toggleGear} title="Settings">
+            <svg width="18" height="18" viewBox="0 0 20 20" fill="currentColor">
+              <path fill-rule="evenodd" d="M11.49 3.17c-.38-1.56-2.6-1.56-2.98 0a1.532 1.532 0 01-2.286.948c-1.372-.836-2.942.734-2.106 2.106.54.886.061 2.042-.947 2.287-1.561.379-1.561 2.6 0 2.978a1.532 1.532 0 01.947 2.287c-.836 1.372.734 2.942 2.106 2.106a1.532 1.532 0 012.287.947c.379 1.561 2.6 1.561 2.978 0a1.533 1.533 0 012.287-.947c1.372.836 2.942-.734 2.106-2.106a1.533 1.533 0 01.947-2.287c1.561-.379 1.561-2.6 0-2.978a1.532 1.532 0 01-.947-2.287c.836-1.372-.734-2.942-2.106-2.106a1.532 1.532 0 01-2.287-.947zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/>
+            </svg>
+          </button>
+          {#if gearOpen}
+            <div class="gear-menu">
+              <label class="control-label">
+                <span class="control-name">Smoothness</span>
+                <input type="range" min="0" max="0.8" step="0.01" bind:value={smoothness} class="slider" />
+                <span class="control-value">{(smoothness * 100).toFixed(0)}%</span>
+              </label>
+              <label class="control-label">
+                <span class="control-name">Sensitivity</span>
+                <input type="range" min="0" max="100" step="1" bind:value={sensitivity} class="slider" />
+                <span class="control-value">{sensitivity}</span>
+              </label>
+              <label class="control-label">
+                <span class="control-name">Min duration</span>
+                <input type="range" min="0" max="100" step="5" bind:value={minDuration} class="slider" />
+                <span class="control-value">{minDuration} ms</span>
+              </label>
+              <label class="control-label">
+                <span class="control-name">Scroll speed</span>
+                <input type="range" min="0.5" max="4" step="0.1" bind:value={scrollSpeed} class="slider" />
+                <span class="control-value">{scrollSpeed.toFixed(1)}x</span>
+              </label>
+              <label class="control-label">
+                <span class="control-name">Harmonic suppression</span>
+                <input type="checkbox" bind:checked={harmonicSuppression} on:change={onHarmonicSuppressionChange} class="checkbox" />
+                <span class="control-value">{harmonicSuppression ? 'On' : 'Off'}</span>
+              </label>
+            </div>
+          {/if}
+        </div>
       {#if status === 'idle' || status === 'error'}
         <button class="btn btn-start" on:click={handleStart}>Start</button>
       {:else if status === 'loading'}
@@ -178,76 +228,20 @@
     </div>
   </header>
 
-  <!-- Status line -->
+  <!-- Status line (hidden when running to maximize canvas space) -->
   {#if status === 'loading'}
     <div class="status-line status-loading">Initializing...</div>
-  {:else if status === 'ready'}
-    <div class="status-line status-running">Running</div>
   {:else if status === 'error'}
     <div class="status-line status-error">Error: {errorMessage}</div>
-  {:else}
+  {:else if status === 'idle'}
     <div class="status-line status-idle">Ready — click Start to begin</div>
   {/if}
 
   <!-- Chromagram canvas (fills available space) -->
   <div class="chromagram-container">
-    <Chromagram {frame} {sensitivity} {minDuration} {smoothness} />
+    <Chromagram {frame} {sensitivity} {minDuration} {smoothness} {scrollSpeed} />
   </div>
 
-<!-- Controls panel (only when running) -->
-  {#if status === 'ready'}
-    <div class="controls-panel">
-      <label class="control-label">
-        <span class="control-name">Smoothness</span>
-        <input
-          type="range"
-          min="0"
-          max="0.8"
-          step="0.01"
-          bind:value={smoothness}
-          class="slider"
-        />
-        <span class="control-value">{(smoothness * 100).toFixed(0)}%</span>
-      </label>
-
-      <label class="control-label">
-        <span class="control-name">Sensitivity</span>
-        <input
-          type="range"
-          min="0"
-          max="100"
-          step="1"
-          bind:value={sensitivity}
-          class="slider"
-        />
-        <span class="control-value">{sensitivity}</span>
-      </label>
-
-      <label class="control-label">
-        <span class="control-name">Min duration</span>
-        <input
-          type="range"
-          min="0"
-          max="100"
-          step="5"
-          bind:value={minDuration}
-          class="slider"
-        />
-        <span class="control-value">{minDuration} ms</span>
-      </label>
-
-      <label class="control-label">
-        <span class="control-name">Harmonic suppression</span>
-        <input
-          type="checkbox"
-          bind:checked={harmonicSuppression}
-          on:change={onHarmonicSuppressionChange}
-          class="checkbox"
-        />
-        <span class="control-value">{harmonicSuppression ? 'On' : 'Off'}</span>
-      </label>
-    </div>
-  {/if}
 </div>
 
 <style>
@@ -277,19 +271,19 @@
     align-items: center;
     justify-content: space-between;
     padding: 0 16px;
-    height: 48px;
+    height: 32px;
     background: linear-gradient(180deg, #10111a 0%, #0c0d10 100%);
     border-bottom: 1px solid #1a1c22;
     flex-shrink: 0;
   }
 
   .app-title {
-    font-size: 15px;
+    font-size: 12px;
     font-weight: 600;
     color: #e8eaed;
     letter-spacing: 0.12em;
     text-transform: uppercase;
-    padding-left: 12px;
+    padding-left: 10px;
     border-left: 2px solid #34d399;
   }
 
@@ -364,15 +358,43 @@
     background: #050508;
   }
 
-  /* Controls panel */
-  .controls-panel {
+  /* Gear menu */
+  .gear-wrapper {
+    position: relative;
+  }
+
+  .btn-gear {
+    background: transparent;
+    border: 1px solid #2a2c34;
+    border-radius: 6px;
+    color: #8b8fa3;
+    padding: 5px 7px;
+    cursor: pointer;
     display: flex;
-    gap: 24px;
     align-items: center;
-    padding: 8px 16px;
-    background: linear-gradient(0deg, #0a0b0e 0%, #0c0d10 100%);
-    border-top: 1px solid #1a1c22;
-    flex-shrink: 0;
+    transition: color 0.15s ease, border-color 0.15s ease;
+  }
+
+  .btn-gear:hover {
+    color: #34d399;
+    border-color: #34d399;
+  }
+
+  .gear-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 8px;
+    background: #12131a;
+    border: 1px solid #1a1c22;
+    border-radius: 8px;
+    padding: 12px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 100;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+    min-width: 300px;
   }
 
   .control-label {
@@ -383,11 +405,6 @@
     color: #8b8fa3;
     cursor: pointer;
     user-select: none;
-  }
-
-  .control-label:last-child {
-    border-left: 1px solid #1a1c22;
-    padding-left: 16px;
   }
 
   .control-name {
