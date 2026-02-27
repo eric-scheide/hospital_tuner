@@ -13,7 +13,7 @@
   export let sensitivity = 50; // 0–100: 0 = nothing visible, 100 = everything visible
   export let minDuration = 15; // ms pitch must be continuous before plotting
   export let smoothness = 0.385; // EMA factor: 0 = no smoothing, 1 = frozen
-  export let scrollSpeed = 2.0; // pixels per frame
+  export let scrollSpeed = 1.5; // pixels per frame
 
   let wrapper;
   let labelCanvas;

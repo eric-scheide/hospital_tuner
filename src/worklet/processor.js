@@ -49,11 +49,29 @@ function getArrayU8FromWasm0(ptr, len) {
   return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 
-let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
-cachedTextDecoder.decode();
+let cachedTextDecoder = null;
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
 let numBytesDecoded = 0;
+
+function getTextDecoder() {
+  if (!cachedTextDecoder) {
+    if (typeof TextDecoder !== 'undefined') {
+      cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
+      cachedTextDecoder.decode();
+    }
+  }
+  return cachedTextDecoder;
+}
+
 function decodeText(ptr, len) {
+  const decoder = getTextDecoder();
+  if (!decoder) {
+    // Fallback for environments without TextDecoder (e.g. Firefox AudioWorkletGlobalScope)
+    const bytes = getUint8ArrayMemory0().subarray(ptr, ptr + len);
+    let str = '';
+    for (let i = 0; i < bytes.length; i++) str += String.fromCharCode(bytes[i]);
+    return str;
+  }
   numBytesDecoded += len;
   if (numBytesDecoded >= MAX_SAFARI_DECODE_BYTES) {
     cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });

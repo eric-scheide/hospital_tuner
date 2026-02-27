@@ -112,7 +112,7 @@ export async function startAudio(onFrame, onReady, onError) {
       new URL('./worklet/processor.js', import.meta.url),
     ),
     WebAssembly.compileStreaming(
-      fetch('/wasm-pkg/hospital_tuner_dsp_bg.wasm'),
+      fetch(import.meta.env.BASE_URL + 'wasm-pkg/hospital_tuner_dsp_bg.wasm'),
     ),
   ]);
 

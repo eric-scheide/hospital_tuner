@@ -29,7 +29,7 @@
   let sensitivity = 10;
   let minDuration = 15;
   let smoothness = 0.385;
-  let scrollSpeed = 2.0;
+  let scrollSpeed = 1.5;
   let gearOpen = false;
 
   function toggleGear() {
@@ -50,28 +50,42 @@
     errorMessage = '';
     try {
       // 1. Request microphone access
-      micStream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-        },
-        video: false,
-      });
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: {
+            echoCancellation: { ideal: false },
+            noiseSuppression: { ideal: false },
+            autoGainControl: { ideal: false },
+          },
+          video: false,
+        });
+      } catch (micErr) {
+        let devices = [];
+        try {
+          const all = await navigator.mediaDevices.enumerateDevices();
+          devices = all.filter(d => d.kind === 'audioinput').map(d => d.label || d.deviceId);
+        } catch (_) {}
+        throw new Error('Microphone: ' + (micErr.message || String(micErr)) + ' | Devices: [' + devices.join(', ') + ']');
+      }
 
       // 2. Create AudioContext
       audioContext = new AudioContext({ sampleRate: 44100 });
 
       // 3. Register the AudioWorklet module and pre-compile the Wasm binary
       //    in parallel for faster startup.
-      const [, wasmModule] = await Promise.all([
-        audioContext.audioWorklet.addModule(
-          new URL('./worklet/processor.js', import.meta.url)
-        ),
-        WebAssembly.compileStreaming(
-          fetch('/wasm-pkg/hospital_tuner_dsp_bg.wasm')
-        ),
-      ]);
+      let wasmModule;
+      try {
+        const processorUrl = new URL('./worklet/processor.js', import.meta.url);
+        const [, wm] = await Promise.all([
+          audioContext.audioWorklet.addModule(processorUrl),
+          WebAssembly.compileStreaming(
+            fetch(import.meta.env.BASE_URL + 'wasm-pkg/hospital_tuner_dsp_bg.wasm')
+          ),
+        ]);
+        wasmModule = wm;
+      } catch (loadErr) {
+        throw new Error('Load worklet/wasm: ' + (loadErr.message || String(loadErr)));
+      }
 
       // 4. Create the worklet node, passing the pre-compiled Wasm Module
       //    via processorOptions (structured-cloned to the worklet thread).
@@ -245,11 +259,16 @@
 </div>
 
 <style>
-  :global(body) {
+  :global(html, body) {
     margin: 0;
+    padding: 0;
+    height: 100%;
+    overflow: hidden;
     background: #050508;
     color: #e8eaed;
     font-family: 'Inter', system-ui, sans-serif;
+    /* Prevent pull-to-refresh and bounce on mobile */
+    overscroll-behavior: none;
   }
 
   :global(*) {
@@ -259,7 +278,7 @@
   .app {
     display: flex;
     flex-direction: column;
-    height: 100vh;
+    height: 100dvh; /* dynamic viewport height — respects mobile URL bar */
     background: #050508;
     color: #e8eaed;
     overflow: hidden;
