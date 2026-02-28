@@ -249,10 +249,10 @@ pub fn pick_peaks(gated: &[f32], sample_rate: f32, fft_size: usize) -> Vec<(usiz
 /// Suppress peaks that appear to be integer harmonics of a stronger peak
 /// by subtracting the expected harmonic contribution.
 ///
-/// Natural harmonics of a fundamental fall off roughly as 1/r (where r is the
+/// Natural harmonics of a fundamental fall off roughly as 1/√r (where r is the
 /// harmonic ratio).  For each detected harmonic match, we subtract:
 ///
-///     q.mag = max(0, q.mag − p.mag × strength / r)
+///     q.mag = max(0, q.mag − p.mag × strength / √r)
 ///
 /// This scales with the fundamental's loudness: a loud note subtracts more
 /// from its harmonics than a quiet one.  If energy remains after subtraction,
@@ -263,13 +263,19 @@ pub fn pick_peaks(gated: &[f32], sample_rate: f32, fft_size: usize) -> Vec<(usiz
 ///   - `max_ratio`: highest harmonic ratio to check (default 6).
 ///
 /// This is O(n²) over peaks; in practice there are < 20 peaks per frame.
-pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>, strength: f32, max_ratio: usize) {
+pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>, raw_spectrum: &[f32], strength: f32, max_ratio: usize) {
     if strength <= 0.0 {
         return;
     }
 
-    // Sort descending by magnitude (strongest first).
-    peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
+    // Sort descending by RAW magnitude (not whitened) so the true fundamental
+    // is always processed first — whitening flattens the spectrum and can make
+    // harmonics appear as strong as the fundamental.
+    peaks.sort_by(|a, b| {
+        let a_raw = if a.0 < raw_spectrum.len() { raw_spectrum[a.0] } else { 0.0 };
+        let b_raw = if b.0 < raw_spectrum.len() { raw_spectrum[b.0] } else { 0.0 };
+        b_raw.partial_cmp(&a_raw).unwrap_or(core::cmp::Ordering::Equal)
+    });
 
     let n = peaks.len();
     for p_idx in 0..n {
@@ -278,7 +284,7 @@ pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>, strength: f32, max_rati
         for r in 2usize..=max_ratio {
             let expected = p_bin * r;
             let tolerance = 1usize.max((expected as f32 * 0.02).round() as usize);
-            let subtraction = p_mag * strength / r as f32;
+            let subtraction = p_mag * strength / (r as f32).sqrt();
             for q_idx in (p_idx + 1)..n {
                 let q_bin = peaks[q_idx].0;
                 let diff = if q_bin >= expected {
@@ -592,7 +598,11 @@ mod tests {
     fn suppress_harmonics_attenuates_overtones() {
         // Fundamental at bin 40, harmonic at bin 80 (2x)
         let mut peaks = vec![(40usize, 1.0f32), (80usize, 0.8f32)];
-        suppress_harmonics(&mut peaks, 1.0, 6);
+        // Build a raw spectrum where bin 40 is louder than bin 80
+        let mut raw_spectrum = vec![0.0f32; 100];
+        raw_spectrum[40] = 2.0;
+        raw_spectrum[80] = 1.0;
+        suppress_harmonics(&mut peaks, &raw_spectrum, 1.0, 6);
 
         // Find the peak at bin 80 after suppression
         let harmonic_mag = peaks
@@ -725,5 +735,779 @@ mod tests {
         for i in [1, 2, 3, 5, 6, 8, 9, 10, 11] {
             assert!(freqs[i] == 0.0, "chroma_freqs[{}] should be 0.0, got {}", i, freqs[i]);
         }
+    }
+
+    // =======================================================================
+    // Harmonic suppression test suite
+    // =======================================================================
+
+    /// Helper: build a raw spectrum array with given (bin, value) pairs.
+    fn make_raw_spectrum(entries: &[(usize, f32)]) -> Vec<f32> {
+        let max_bin = entries.iter().map(|&(b, _)| b).max().unwrap_or(0);
+        let mut raw = vec![0.0f32; max_bin + 1];
+        for &(bin, val) in entries {
+            raw[bin] = val;
+        }
+        raw
+    }
+
+    /// Helper: find a peak by bin index after suppression (peaks may be reordered).
+    fn peak_mag(peaks: &[(usize, f32)], bin: usize) -> f32 {
+        peaks.iter().find(|&&(b, _)| b == bin).map(|&(_, m)| m).unwrap_or(-1.0)
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_single_note_with_harmonics
+    // A4 fundamental + 2nd and 3rd harmonics. All harmonics should be
+    // reduced to residuals after suppression.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_single_note_with_harmonics() {
+        let mut peaks = vec![(82, 1.2f32), (163, 1.0f32), (245, 0.8f32)];
+        let raw = make_raw_spectrum(&[(82, 10.0), (163, 5.0), (245, 3.3)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.2).abs() < 1e-3, "fundamental unchanged");
+        // bin 163: 1.0 - 1.2/sqrt(2) = 1.0 - 0.8485 = 0.1515
+        assert!((peak_mag(&peaks, 163) - 0.1515).abs() < 0.01,
+            "2nd harmonic: expected ~0.1515, got {}", peak_mag(&peaks, 163));
+        // bin 245: 0.8 - 1.2/sqrt(3) = 0.8 - 0.6928 = 0.1072
+        assert!((peak_mag(&peaks, 245) - 0.1072).abs() < 0.01,
+            "3rd harmonic: expected ~0.1072, got {}", peak_mag(&peaks, 245));
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_c_major_chord_unharmed
+    // Three notes (C-E-G) that are NOT harmonically related should pass
+    // through suppression completely unchanged.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_c_major_chord_unharmed() {
+        let mut peaks = vec![(49, 1.0f32), (61, 0.9f32), (73, 0.8f32)];
+        let raw = make_raw_spectrum(&[(49, 8.0), (61, 7.0), (73, 6.0)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        assert!((peak_mag(&peaks, 49) - 1.0).abs() < 1e-6, "C unchanged");
+        assert!((peak_mag(&peaks, 61) - 0.9).abs() < 1e-6, "E unchanged");
+        assert!((peak_mag(&peaks, 73) - 0.8).abs() < 1e-6, "G unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_octave_documents_limitation
+    // Known limitation: a real octave note (2:1 ratio) gets suppressed
+    // because it looks like the 2nd harmonic.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_octave_documents_limitation() {
+        let mut peaks = vec![(82, 1.0f32), (163, 0.95f32)];
+        let raw = make_raw_spectrum(&[(82, 8.0), (163, 7.5)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.0).abs() < 1e-6, "fundamental unchanged");
+        // 0.95 - 1.0/sqrt(2) = 0.95 - 0.7071 = 0.2429
+        let oct = peak_mag(&peaks, 163);
+        assert!((oct - 0.2429).abs() < 0.01,
+            "octave suppressed (known limitation): expected ~0.2429, got {}", oct);
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_power_chord_fifth_survives
+    // A perfect fifth (3:2 ratio) is NOT an integer multiple, so both
+    // notes should survive suppression unchanged.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_power_chord_fifth_survives() {
+        let mut peaks = vec![(82, 1.0f32), (122, 0.9f32)];
+        let raw = make_raw_spectrum(&[(82, 8.0), (122, 7.0)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.0).abs() < 1e-6, "root unchanged");
+        assert!((peak_mag(&peaks, 122) - 0.9).abs() < 1e-6, "fifth unchanged");
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_strength_zero_is_noop
+    // With strength=0, suppression should be completely disabled.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_strength_zero_is_noop() {
+        let mut peaks = vec![(82, 1.2f32), (163, 1.0f32), (245, 0.8f32)];
+        let raw = make_raw_spectrum(&[(82, 10.0), (163, 5.0), (245, 3.3)]);
+        suppress_harmonics(&mut peaks, &raw, 0.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.2).abs() < 1e-6);
+        assert!((peak_mag(&peaks, 163) - 1.0).abs() < 1e-6);
+        assert!((peak_mag(&peaks, 245) - 0.8).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_strength_aggressive_zeros_harmonics
+    // With strength=2.0, harmonics should be driven to zero.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_strength_aggressive_zeros_harmonics() {
+        let mut peaks = vec![(82, 1.2f32), (163, 1.0f32), (245, 0.8f32)];
+        let raw = make_raw_spectrum(&[(82, 10.0), (163, 5.0), (245, 3.3)]);
+        suppress_harmonics(&mut peaks, &raw, 2.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.2).abs() < 1e-6, "fundamental unchanged");
+        // 1.0 - 1.2*2.0/sqrt(2) = 1.0 - 1.6971 → clamped to 0.0
+        assert!(peak_mag(&peaks, 163) < 1e-6,
+            "2nd harmonic should be zero, got {}", peak_mag(&peaks, 163));
+        // 0.8 - 1.2*2.0/sqrt(3) = 0.8 - 1.3856 → clamped to 0.0
+        assert!(peak_mag(&peaks, 245) < 1e-6,
+            "3rd harmonic should be zero, got {}", peak_mag(&peaks, 245));
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_ghost_notes_below_threshold (integration test)
+    // Full 6-peak harmonic series → suppress → chroma → normalize.
+    // Ghost pitch classes (E, C#) should be below PRESENCE_THRESHOLD.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_ghost_notes_below_threshold() {
+        let mut peaks = vec![
+            (82, 1.2f32), (163, 1.0), (245, 0.9),
+            (327, 0.85), (409, 0.8), (491, 0.75),
+        ];
+        let raw = make_raw_spectrum(&[
+            (82, 10.0), (163, 5.0), (245, 3.3),
+            (327, 2.5), (409, 2.0), (491, 1.7),
+        ]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // PC 9 (A) should dominate
+        assert!((chroma[9] - 1.0).abs() < 1e-3, "A should be 1.0 after normalize");
+        // Ghost notes (E=PC4, C#=PC1) should be suppressed below threshold
+        assert!(chroma[4] < PRESENCE_THRESHOLD,
+            "E ghost should be < {}, got {}", PRESENCE_THRESHOLD, chroma[4]);
+        assert!(chroma[1] < PRESENCE_THRESHOLD,
+            "C# ghost should be < {}, got {}", PRESENCE_THRESHOLD, chroma[1]);
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_tolerance_boundary
+    // Verify the 2% tolerance window: bin just inside should match,
+    // bin just outside should not.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_tolerance_boundary() {
+        let mut peaks = vec![(50, 1.0f32), (102, 0.8f32), (103, 0.8f32)];
+        let raw = make_raw_spectrum(&[(50, 10.0), (102, 5.0), (103, 5.0)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        // r=2: expected=100, tol=max(1, round(100*0.02))=2
+        // bin 102: |102-100|=2 ≤ 2 → MATCH → 0.8 - 1.0/sqrt(2) = 0.0929
+        let inside = peak_mag(&peaks, 102);
+        assert!((inside - 0.0929).abs() < 0.01,
+            "inside tolerance: expected ~0.0929, got {}", inside);
+        // bin 103: |103-100|=3 > 2 → NO MATCH → unchanged at 0.8
+        let outside = peak_mag(&peaks, 103);
+        assert!((outside - 0.8).abs() < 1e-6,
+            "outside tolerance: expected 0.8, got {}", outside);
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_empty_peaks_no_panic
+    // Edge case: empty input should not panic.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_empty_peaks_no_panic() {
+        let mut peaks: Vec<(usize, f32)> = vec![];
+        let raw: Vec<f32> = vec![];
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+        assert!(peaks.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_single_peak_unchanged
+    // A single peak has no harmonics to suppress and should be unchanged.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_single_peak_unchanged() {
+        let mut peaks = vec![(82, 1.0f32)];
+        let raw = make_raw_spectrum(&[(82, 10.0)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        assert!((peak_mag(&peaks, 82) - 1.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // suppress_decay_is_sqrt_not_linear
+    // Verify the 1/√r decay model by checking exact subtraction amounts
+    // at r=2, r=3, r=4. If someone changes to 1/r, these will fail.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn suppress_decay_is_sqrt_not_linear() {
+        let mut peaks = vec![
+            (100, 1.0f32), (200, 0.9f32), (300, 0.9f32), (400, 0.9f32),
+        ];
+        let raw = make_raw_spectrum(&[(100, 10.0), (200, 5.0), (300, 4.0), (400, 3.0)]);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        // r=2: 0.9 - 1.0/sqrt(2) = 0.9 - 0.7071 = 0.1929
+        let r2 = peak_mag(&peaks, 200);
+        assert!((r2 - 0.1929).abs() < 0.01,
+            "r=2: expected ~0.1929, got {}", r2);
+        // r=3: 0.9 - 1.0/sqrt(3) = 0.9 - 0.5774 = 0.3226
+        let r3 = peak_mag(&peaks, 300);
+        assert!((r3 - 0.3226).abs() < 0.01,
+            "r=3: expected ~0.3226, got {}", r3);
+        // r=4: 0.9 - 1.0/sqrt(4) = 0.4, then cascading from bin 200 (mag 0.1929):
+        //   200*2=400 → sub = 0.1929/sqrt(2) = 0.1364 → 0.4 - 0.1364 = 0.2636
+        let r4 = peak_mag(&peaks, 400);
+        assert!((r4 - 0.2636).abs() < 0.01,
+            "r=4 (with cascade): expected ~0.2636, got {}", r4);
+    }
+
+    // =======================================================================
+    // Realistic instrument simulation tests
+    // =======================================================================
+    //
+    // These tests use physically-modeled harmonic spectra based on published
+    // acoustic measurements of real instruments. Amplitudes reflect body
+    // resonance, pluck position, and radiation characteristics — not
+    // idealized 1/n falloff.
+
+    /// Build a full FFT magnitude spectrum from harmonic peaks.
+    /// Each peak is a Gaussian bump (σ=1.5 bins) so pick_peaks can find local maxima.
+    fn make_instrument_spectrum(harmonics: &[(usize, f32)], spectrum_len: usize) -> Vec<f32> {
+        let mut spectrum = vec![0.0f32; spectrum_len];
+        let sigma = 1.5f32;
+        for &(bin, amp) in harmonics {
+            // Place a Gaussian bump centered at `bin`
+            let lo = if bin >= 5 { bin - 5 } else { 0 };
+            let hi = (bin + 6).min(spectrum_len);
+            for i in lo..hi {
+                let d = (i as f32 - bin as f32) / sigma;
+                spectrum[i] += amp * (-0.5 * d * d).exp();
+            }
+        }
+        spectrum
+    }
+
+    // -----------------------------------------------------------------------
+    // Guitar open low E2 (82.41 Hz) — steel-string acoustic
+    //
+    // Harmonic profile from acoustic measurements:
+    //   - 2nd harmonic is STRONGEST (body Helmholtz resonance ~165 Hz)
+    //   - 3rd-4th boosted by top-plate resonance (~250-330 Hz)
+    //   - 7th is weak (pluck-point node at ~1/7 string length)
+    //   - Fundamental is quieter than harmonics 2-4 (body radiates poorly at 82 Hz)
+    //
+    // At FFT_SIZE=8192, SAMPLE_RATE=44100 (5.38 Hz/bin):
+    //   H1=82.41→bin 15, H2=164.82→bin 31, H3=247.24→bin 46,
+    //   H4=329.65→bin 61, H5=412.06→bin 77, H6=494.47→bin 92
+    // -----------------------------------------------------------------------
+    #[test]
+    fn guitar_low_e_fundamental_survives_suppression() {
+        // Realistic raw amplitudes (2nd harmonic loudest due to body resonance)
+        let harmonics = [
+            (15usize, 6.0f32),   // H1: 82 Hz fundamental
+            (31, 10.0),          // H2: 165 Hz — loudest (body resonance)
+            (46, 8.5),           // H3: 247 Hz
+            (61, 7.5),           // H4: 330 Hz
+            (77, 5.0),           // H5: 412 Hz
+            (92, 4.0),           // H6: 494 Hz
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+
+        // Whiten the spectrum (this is what the real pipeline does)
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+
+        // Pick peaks from whitened spectrum
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        assert!(!peaks.is_empty(), "should find peaks in guitar spectrum");
+
+        // Verify we found the fundamental
+        let has_fundamental = peaks.iter().any(|&(b, _)| b == 15);
+        assert!(has_fundamental, "fundamental at bin 15 should be a peak");
+
+        // Run suppression
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        // Fundamental should survive with significant energy
+        let fund_mag = peak_mag(&peaks, 15);
+        assert!(fund_mag > 0.0, "fundamental must survive suppression, got {}", fund_mag);
+
+        // Compute chroma and normalize
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // E = pitch class 4. After suppression + normalization, E should dominate.
+        let e_pc = 4; // E
+        assert!(chroma[e_pc] > 0.5,
+            "E (PC 4) should dominate chroma after suppression, got {:.3}", chroma[e_pc]);
+
+        // The dominant pitch class should be E (or at least E should be very strong)
+        let max_pc = chroma.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i).unwrap();
+        // E2's harmonics map to: E(4), B(11), E(4), G#(8), B(11), E(4)
+        // So PC 4 (E) should accumulate the most energy
+        assert!(max_pc == e_pc || chroma[e_pc] > 0.8,
+            "dominant PC should be E(4), got PC {} (E={:.3})", max_pc, chroma[e_pc]);
+    }
+
+    #[test]
+    fn guitar_low_e_ghost_notes_reduced() {
+        // Same guitar E2 spectrum
+        let harmonics = [
+            (15, 6.0f32), (31, 10.0), (46, 8.5),
+            (61, 7.5), (77, 5.0), (92, 4.0),
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+
+        // Snapshot before suppression (un-normalized to avoid rescaling artifacts)
+        let peaks_before = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        let chroma_before = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+
+        // Suppress
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+        let chroma_after = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+
+        // Compare absolute (un-normalized) energy — suppression should reduce
+        // ghost note energy. We use un-normalized chroma because normalization
+        // can paradoxically increase ghost ratios: suppression also reduces
+        // same-PC harmonics (e.g. E2's octave E3 both map to PC 4), lowering
+        // the denominator and inflating other PCs after division.
+        for &ghost_pc in &[8usize, 11] {  // G# and B
+            assert!(chroma_after[ghost_pc] < chroma_before[ghost_pc],
+                "absolute ghost PC {} energy should decrease: before={:.3}, after={:.3}",
+                ghost_pc, chroma_before[ghost_pc], chroma_after[ghost_pc]);
+        }
+
+        // With aggressive strength (2.0), normalized ghosts should be well-suppressed
+        let mut peaks_agg = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        suppress_harmonics(&mut peaks_agg, &raw, 2.0, 6);
+        let mut chroma_agg = compute_chroma(&peaks_agg, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma_agg);
+        let active_agg = active_pitch_classes(&chroma_agg, PRESENCE_THRESHOLD);
+
+        // At strength=2.0, only E-related pitch classes should remain active
+        assert!(active_agg.len() <= 3,
+            "aggressive suppression should leave ≤3 active PCs, got {}: {:?}",
+            active_agg.len(), active_agg);
+    }
+
+    // -----------------------------------------------------------------------
+    // Guitar open A2 (110 Hz) — second-thickest string
+    //
+    // Similar body resonance profile but shifted. Body resonance still
+    // boosts ~200-400 Hz range → harmonics 2 and 3 are boosted.
+    //
+    // H1=110→bin 20, H2=220→bin 41, H3=330→bin 61, H4=440→bin 82,
+    // H5=550→bin 102, H6=660→bin 122
+    // -----------------------------------------------------------------------
+    #[test]
+    fn guitar_open_a_identifies_correct_pitch_class() {
+        let harmonics = [
+            (20usize, 7.0f32),  // H1: 110 Hz
+            (41, 10.0),         // H2: 220 Hz — loudest
+            (61, 8.0),          // H3: 330 Hz
+            (82, 6.0),          // H4: 440 Hz (= A4!)
+            (102, 4.0),         // H5: 550 Hz
+            (122, 3.0),         // H6: 660 Hz
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        // Snapshot before suppression
+        let peaks_before = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        let chroma_before = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+        let mut chroma_before_norm = chroma_before;
+        normalize_chroma(&mut chroma_before_norm);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // A = pitch class 9
+        // All harmonics of A map to: A(9), A(9), E(4), A(9), C#(1), E(4)
+        // After suppression, A should dominate
+        assert!(chroma[9] > 0.5,
+            "A (PC 9) should dominate after suppression, got {:.3}", chroma[9]);
+
+        // Compare absolute (un-normalized) ghost energy — avoids normalization
+        // artifact where suppressing same-PC harmonics lowers the denominator
+        // and paradoxically inflates ghost ratios after renormalization.
+        let chroma_before_abs = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+        let chroma_after_abs = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        for &ghost_pc in &[4usize, 1] {  // E, C#
+            assert!(chroma_after_abs[ghost_pc] < chroma_before_abs[ghost_pc],
+                "absolute ghost PC {} energy should decrease: before={:.3}, after={:.3}",
+                ghost_pc, chroma_before_abs[ghost_pc], chroma_after_abs[ghost_pc]);
+        }
+
+        // Note: even at strength=2.0, whitening equalizes peak magnitudes so
+        // the subtraction (based on whitened p_mag) may not fully eliminate ghosts.
+        // The squelch gate in the UI provides the additional filtering needed.
+    }
+
+    // -----------------------------------------------------------------------
+    // Guitar power chord E5 (E2 + B2) — two notes simultaneously
+    //
+    // A power chord has the root + fifth. Both should survive suppression
+    // because a fifth (3:2 ratio) is not an integer harmonic relationship.
+    //
+    // E2=82.41 Hz → bin 15, B2=123.47 Hz → bin 23
+    // E2 harmonics: 15, 31, 46, 61, 77, 92
+    // B2 harmonics: 23, 46, 69, 92, 115, 138
+    // Note: H3 of E (bin 46) ≈ H2 of B (bin 46) — they overlap!
+    // -----------------------------------------------------------------------
+    #[test]
+    fn guitar_power_chord_both_notes_survive() {
+        // E2 harmonics
+        let e_harmonics = [
+            (15usize, 6.0f32), (31, 10.0), (46, 8.5),
+            (61, 7.5), (77, 5.0), (92, 4.0),
+        ];
+        // B2 harmonics (slightly quieter — typical for a fretted note)
+        let b_harmonics = [
+            (23usize, 5.0f32), (46, 8.0), (69, 6.0),
+            (92, 4.5), (115, 3.0), (138, 2.5),
+        ];
+
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        // Combine both notes into one spectrum
+        let mut raw = vec![0.0f32; spectrum_len];
+        let sigma = 1.5f32;
+        for harmonics in [&e_harmonics[..], &b_harmonics[..]] {
+            for &(bin, amp) in harmonics {
+                let lo = if bin >= 5 { bin - 5 } else { 0 };
+                let hi = (bin + 6).min(spectrum_len);
+                for i in lo..hi {
+                    let d = (i as f32 - bin as f32) / sigma;
+                    raw[i] += amp * (-0.5 * d * d).exp();
+                }
+            }
+        }
+
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // E (PC 4) and B (PC 11) should both be present
+        assert!(chroma[4] > 0.3,
+            "E should survive in power chord, got {:.3}", chroma[4]);
+        assert!(chroma[11] > 0.2,
+            "B should survive in power chord, got {:.3}", chroma[11]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Piano A4 (440 Hz) — very different harmonic profile from guitar
+    //
+    // Piano has strong fundamental, nearly-harmonic overtones with
+    // slight inharmonicity, and faster high-harmonic rolloff than guitar.
+    //
+    // H1=440→bin 82, H2=880→bin 163, H3=1320→bin 245,
+    // H4=1760→bin 327, H5=2200→bin 409, H6=2640→bin 491
+    // -----------------------------------------------------------------------
+    #[test]
+    fn piano_a4_clean_single_note() {
+        // Piano: fundamental is strongest, harmonics decay more uniformly
+        let harmonics = [
+            (82usize, 10.0f32),  // H1: 440 Hz — loudest
+            (163, 7.0),          // H2: 880 Hz
+            (245, 4.5),          // H3: 1320 Hz
+            (327, 3.0),          // H4: 1760 Hz
+            (409, 2.0),          // H5: 2200 Hz
+            (491, 1.5),          // H6: 2640 Hz
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // A = pitch class 9, should clearly dominate
+        assert!(chroma[9] > 0.8,
+            "A (PC 9) should dominate piano A4, got {:.3}", chroma[9]);
+
+        // Compare absolute (un-normalized) ghost energy to avoid normalization artifact
+        let peaks_before = pick_peaks(
+            &whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE), SAMPLE_RATE, FFT_SIZE);
+        let chroma_before_abs = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+        let chroma_after_abs = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+
+        // Non-dominant PCs should have less or equal absolute energy after suppression
+        for pc in 0..12 {
+            if pc == 9 { continue; }
+            assert!(chroma_after_abs[pc] <= chroma_before_abs[pc] + 0.01,
+                "absolute PC {} should not increase: before={:.3}, after={:.3}",
+                pc, chroma_before_abs[pc], chroma_after_abs[pc]);
+        }
+
+        // Note: whitening equalizes peak magnitudes, limiting how much
+        // suppression can reduce ghost notes through the full pipeline.
+        // The squelch gate provides additional filtering in the UI.
+    }
+
+    // -----------------------------------------------------------------------
+    // Alto Saxophone — Concert Bb3 (233.08 Hz)
+    //
+    // Conical bore with single reed: all harmonics present (even and odd),
+    // roughly 1/n rolloff. H1 is strongest. Should be straightforward for
+    // the suppressor since the fundamental dominates in raw spectrum.
+    //
+    // H1=233→bin 43, H2=466→bin 87, H3=699→bin 130, H4=932→bin 173,
+    // H5=1165→bin 216, H6=1398→bin 260, H7=1632→bin 303, H8=1865→bin 346
+    // -----------------------------------------------------------------------
+    #[test]
+    fn alto_sax_bb3_fundamental_dominates() {
+        let harmonics = [
+            (43usize, 10.0f32),  // H1: 233 Hz — strongest
+            (87, 9.0),           // H2: 466 Hz
+            (130, 7.5),          // H3: 699 Hz
+            (173, 6.0),          // H4: 932 Hz
+            (216, 4.5),          // H5: 1165 Hz
+            (260, 3.0),          // H6: 1398 Hz
+            (303, 1.8),          // H7: 1632 Hz
+            (346, 1.0),          // H8: 1865 Hz
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        // Snapshot before
+        let peaks_before = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        let chroma_before = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let chroma_after = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        let mut chroma_norm = chroma_after;
+        normalize_chroma(&mut chroma_norm);
+
+        // Bb = pitch class 10. Should dominate after suppression.
+        // H1(Bb), H2(Bb), H4(Bb), H8(Bb) all map to PC 10
+        assert!(chroma_norm[10] > 0.5,
+            "Bb (PC 10) should dominate sax, got {:.3}", chroma_norm[10]);
+
+        // Ghost notes: F(5) from H3/H6, D(2) from H5, Ab(8) from H7
+        // Absolute energy should decrease for all non-Bb pitch classes
+        for pc in 0..12 {
+            if pc == 10 { continue; }
+            assert!(chroma_after[pc] <= chroma_before[pc] + 0.01,
+                "sax: absolute PC {} should not increase: before={:.3}, after={:.3}",
+                pc, chroma_before[pc], chroma_after[pc]);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Flute — A4 (440 Hz)
+    //
+    // Open cylindrical bore with edge-tone excitation: produces the
+    // "purest" orchestral tone. Fundamental overwhelmingly dominates,
+    // harmonics roll off ~1/n² (roughly -12 dB per harmonic). H2 is
+    // typically only 25% of fundamental amplitude.
+    //
+    // This is the easiest case for suppression — barely any harmonics
+    // to suppress in the first place.
+    //
+    // H1=440→bin 82, H2=880→bin 163, H3=1320→bin 245, H4=1760→bin 327
+    // -----------------------------------------------------------------------
+    #[test]
+    fn flute_a4_nearly_pure_tone() {
+        let harmonics = [
+            (82usize, 10.0f32),  // H1: 440 Hz — overwhelmingly dominant
+            (163, 2.5),          // H2: 880 Hz — -12 dB
+            (245, 0.8),          // H3: 1320 Hz — -22 dB
+            (327, 0.3),          // H4: 1760 Hz — -30 dB
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let mut chroma = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        normalize_chroma(&mut chroma);
+
+        // A = pitch class 9. Should be virtually the only active PC.
+        assert!((chroma[9] - 1.0).abs() < 0.01,
+            "A (PC 9) should be ~1.0 for flute, got {:.3}", chroma[9]);
+
+        // With such weak harmonics, flute should have very few active PCs
+        let active = active_pitch_classes(&chroma, PRESENCE_THRESHOLD);
+        assert!(active.len() <= 2,
+            "flute should have ≤2 active PCs (nearly pure tone), got {}: {:?}",
+            active.len(), active);
+    }
+
+    // -----------------------------------------------------------------------
+    // Clarinet — Concert Bb3 (233.08 Hz)
+    //
+    // Closed cylindrical bore with single reed: acts as a stopped pipe,
+    // strongly suppressing EVEN harmonics. Odd harmonics (1, 3, 5, 7, 9, 11)
+    // dominate with ~1/n decay. Even harmonics are present but at ~5% of
+    // the fundamental — a faint whisper.
+    //
+    // This is an interesting test because the clarinet's natural spectrum
+    // already "looks like" a chord (Bb + F + D + Ab + C + Eb from odd
+    // harmonics). The suppressor must handle these wide-spaced overtones.
+    //
+    // H1=233→bin 43, H3=699→bin 130, H5=1165→bin 216,
+    // H7=1632→bin 303, H9=2098→bin 389, H11=2564→bin 476
+    // -----------------------------------------------------------------------
+    #[test]
+    fn clarinet_bb3_odd_harmonic_dominance() {
+        let harmonics = [
+            (43usize, 10.0f32),  // H1: 233 Hz (Bb)
+            (87, 0.5),           // H2: 466 Hz (Bb) — suppressed by bore
+            (130, 8.0),          // H3: 699 Hz (F) — strong odd harmonic
+            (173, 0.3),          // H4: 932 Hz (Bb) — suppressed
+            (216, 5.5),          // H5: 1165 Hz (D)
+            (260, 0.2),          // H6: 1398 Hz (F) — suppressed
+            (303, 3.5),          // H7: 1632 Hz (Ab)
+            (346, 0.1),          // H8: 1865 Hz (Bb) — suppressed
+            (389, 2.0),          // H9: 2098 Hz (C)
+            (476, 1.0),          // H11: 2564 Hz (Eb)
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        // Snapshot before
+        let peaks_before = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        let chroma_before = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let chroma_after = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        let mut chroma_norm = chroma_after;
+        normalize_chroma(&mut chroma_norm);
+
+        // Bb = PC 10 should be the strongest PC. The clarinet's strong odd
+        // harmonics (H3=F, H5=D, H7=Ab) spread energy widely, so Bb won't
+        // be as dominant as for other instruments — but it should still lead.
+        let max_pc = chroma_norm.iter().enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .map(|(i, _)| i).unwrap();
+        assert!(max_pc == 10 || chroma_norm[10] > 0.4,
+            "Bb (PC 10) should lead or be strong for clarinet, got PC {} (Bb={:.3})",
+            max_pc, chroma_norm[10]);
+
+        // Suppression should reduce absolute energy of ghost PCs
+        // F(5) from H3, D(2) from H5, Ab(8) from H7
+        for &ghost_pc in &[5usize, 2, 8] {
+            assert!(chroma_after[ghost_pc] <= chroma_before[ghost_pc] + 0.01,
+                "clarinet: absolute PC {} should not increase: before={:.3}, after={:.3}",
+                ghost_pc, chroma_before[ghost_pc], chroma_after[ghost_pc]);
+        }
+
+        // The strong H3 (F) is a known challenge — it's 80% of fundamental
+        // amplitude and falls at r=3. Subtraction: 1.0/√3 = 0.577.
+        // H3 whitened residual should be significantly reduced but may survive.
+        // Verify it's at least reduced from the unsuppressed case.
+        assert!(chroma_after[5] < chroma_before[5],
+            "clarinet F ghost (PC 5) should decrease: before={:.3}, after={:.3}",
+            chroma_before[5], chroma_after[5]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trumpet — Concert Bb3 (233.08 Hz)
+    //
+    // Mostly cylindrical bore + cup mouthpiece + bell flare. The bell
+    // creates a formant peak around 900-1200 Hz that makes H4 and H5
+    // LOUDER than the fundamental — the hardest case for suppression.
+    //
+    // This tests the algorithm's behavior when the fundamental is NOT
+    // the loudest peak in the raw spectrum. The sort-by-raw-magnitude
+    // will process H4 first, but H4's integer multiples (2×H4=H8, etc.)
+    // won't hit the fundamental. When H1 processes, it correctly
+    // suppresses its own harmonics.
+    //
+    // H1=233→bin 43, H2=466→bin 87, H3=699→bin 130, H4=932→bin 173,
+    // H5=1165→bin 216, H6=1398→bin 260, H7=1632→bin 303
+    // -----------------------------------------------------------------------
+    #[test]
+    fn trumpet_bb3_formant_boosted_harmonics() {
+        let harmonics = [
+            (43usize, 10.0f32),  // H1: 233 Hz
+            (87, 9.5),           // H2: 466 Hz
+            (130, 9.0),          // H3: 699 Hz
+            (173, 11.0),         // H4: 932 Hz — LOUDEST (bell formant)
+            (216, 10.5),         // H5: 1165 Hz — also louder than H1
+            (260, 8.5),          // H6: 1398 Hz
+            (303, 6.5),          // H7: 1632 Hz
+            (346, 4.5),          // H8: 1865 Hz
+            (389, 2.5),          // H9: 2098 Hz
+            (433, 1.2),          // H10: 2331 Hz
+        ];
+        let spectrum_len = FFT_SIZE / 2 + 1;
+        let raw = make_instrument_spectrum(&harmonics, spectrum_len);
+        let whitened = whiten_spectrum(&raw, SAMPLE_RATE, FFT_SIZE);
+        let mut peaks = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+
+        // Verify the fundamental survives (it's not at risk — only multiples
+        // of stronger peaks are suppressed, not subharmonics)
+        let fund_before = peaks.iter().find(|&&(b, _)| b == 43).map(|&(_, m)| m);
+        assert!(fund_before.is_some(), "fundamental at bin 43 should be a peak");
+
+        // Snapshot before
+        let peaks_before = pick_peaks(&whitened, SAMPLE_RATE, FFT_SIZE);
+        let chroma_before = compute_chroma(&peaks_before, SAMPLE_RATE, FFT_SIZE);
+
+        suppress_harmonics(&mut peaks, &raw, 1.0, 6);
+
+        let chroma_after = compute_chroma(&peaks, SAMPLE_RATE, FFT_SIZE);
+        let mut chroma_norm = chroma_after;
+        normalize_chroma(&mut chroma_norm);
+
+        // Fundamental should survive — suppression only targets multiples,
+        // not subharmonics, so bin 43 is safe even though H4/H5 are louder
+        let fund_after = peak_mag(&peaks, 43);
+        assert!(fund_after > 0.0,
+            "trumpet fundamental must survive, got {}", fund_after);
+
+        // Bb (PC 10) should still be the dominant pitch class because
+        // H1, H2, H4, H8, H10 all map to Bb
+        assert!(chroma_norm[10] > 0.3,
+            "Bb (PC 10) should be significant for trumpet, got {:.3}", chroma_norm[10]);
+
+        // Absolute ghost energy should not increase
+        for pc in 0..12 {
+            if pc == 10 { continue; }
+            assert!(chroma_after[pc] <= chroma_before[pc] + 0.01,
+                "trumpet: absolute PC {} should not increase: before={:.3}, after={:.3}",
+                pc, chroma_before[pc], chroma_after[pc]);
+        }
+
+        // The trumpet is the hardest case: with formant-boosted H4/H5,
+        // ghost notes (F from H3/H6, D from H5) may survive suppression.
+        // This documents the limitation — trumpet benefits from higher
+        // strength settings or the squelch gate in polyphonic mode.
+        let active_before = active_pitch_classes(&{
+            let mut c = chroma_before;
+            normalize_chroma(&mut c);
+            c
+        }, PRESENCE_THRESHOLD);
+        let active_after = active_pitch_classes(&chroma_norm, PRESENCE_THRESHOLD);
+        // Suppression should at least not make things worse
+        assert!(active_after.len() <= active_before.len() + 1,
+            "trumpet: suppression should not significantly increase active PCs: before={}, after={}",
+            active_before.len(), active_after.len());
     }
 }

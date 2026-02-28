@@ -218,7 +218,7 @@ impl TunerProcessor {
 
         // Step 10 — optionally suppress harmonic overtones.
         if self.harmonic_suppression {
-            suppress_harmonics(&mut peaks, self.harmonic_strength, self.harmonic_max_ratio);
+            suppress_harmonics(&mut peaks, &spectrum, self.harmonic_strength, self.harmonic_max_ratio);
         }
 
         // Step 11 — map peaks to 12-bin chroma vector.
