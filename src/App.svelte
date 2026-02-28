@@ -211,7 +211,7 @@
 <div class="app">
   <!-- Header bar -->
   <header class="app-header">
-    <span class="app-title">Hospital Tuner</span>
+    <span class="app-title">Hospital Tuner <span class="version">0.5</span></span>
     <div class="header-controls">
       <div class="gear-wrapper">
           <button class="btn btn-gear" on:click={toggleGear} title="Settings">
@@ -333,6 +333,13 @@
     text-transform: uppercase;
     padding-left: 10px;
     border-left: 2px solid #34d399;
+  }
+
+  .version {
+    font-weight: 400;
+    color: #6b7280;
+    font-size: 10px;
+    letter-spacing: 0.05em;
   }
 
   .header-controls {

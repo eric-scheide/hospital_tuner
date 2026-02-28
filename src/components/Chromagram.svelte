@@ -49,6 +49,7 @@
   let monoSmoothY = null;
   let monoPrevPc = null;
   let monoOnsetMs = null;
+  let monoPrevSemi = null;
 
   function resetAllState() {
     for (let i = 0; i < 12; i++) {
@@ -61,6 +62,7 @@
     monoSmoothY = null;
     monoPrevPc = null;
     monoOnsetMs = null;
+    monoPrevSemi = null;
   }
 
   // Reset state when toggling polyphonic mode
@@ -97,6 +99,18 @@
     ctx.beginPath();
     ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
     ctx.fill();
+  }
+
+  function semitoneToHue(semi) {
+    let s = ((semi % 12) + 12) % 12;
+    const lo = Math.floor(s) % 12;
+    const hi = (lo + 1) % 12;
+    const frac = s - Math.floor(s);
+    let h0 = PITCH_HUES[lo], h1 = PITCH_HUES[hi];
+    if (h1 < h0) h1 += 360;
+    let hue = h0 + frac * (h1 - h0);
+    if (hue >= 360) hue -= 360;
+    return hue;
   }
 
   function freqToSemitone(freq) {
@@ -276,7 +290,7 @@
         }
         const y = ns.smoothY;
 
-        const hue = PITCH_HUES[pc];
+        const hue = semitoneToHue(semi);
 
         drawFirefly(hue, alpha, HX, y, HX - shift, ns.prevY);
         ns.prevY = y;
@@ -290,27 +304,42 @@
           let pc = Math.round(semi) % 12;
           if (pc < 0) pc += 12;
 
-          // Track pitch continuity
-          if (pc !== monoPrevPc) {
+          // Start onset timer on silence→sound transition only
+          if (monoOnsetMs === null) {
             monoOnsetMs = now;
-            monoPrevPc = pc;
-            monoPrevY = null;
-            monoSmoothY = null;
           }
+          monoPrevPc = pc;
 
           // Gate: don't plot until pitch has been continuous for MIN_DURATION_MS
-          if (now - monoOnsetMs < MIN_DURATION_MS) return;
+          if (now - monoOnsetMs < MIN_DURATION_MS) {
+            monoPrevSemi = semi;
+            return;
+          }
+
+          // Detect discrete note jump vs glissando by per-frame pitch change.
+          // Glissando: pitch sweeps through intermediates (~0.05–0.3 semi/frame).
+          // Scale step: pitch jumps 1+ semitones in one frame.
+          let jumped = false;
+          if (monoPrevSemi !== null) {
+            let ds = Math.abs(semi - monoPrevSemi);
+            if (ds > 6) ds = 12 - ds; // handle octave wrap (B→C)
+            if (ds > 0.45) jumped = true;
+          }
+          monoPrevSemi = semi;
 
           const rawY = semitoneToY(semi);
-          if (monoSmoothY === null || Math.abs(rawY - monoSmoothY) > logicalH * 0.4) {
+          if (monoSmoothY === null || jumped) {
             monoSmoothY = rawY;
+            monoPrevY = null; // break the connecting line
           } else {
             monoSmoothY = SMOOTH * monoSmoothY + (1 - SMOOTH) * rawY;
           }
           const y = monoSmoothY;
 
-          const hue = PITCH_HUES[pc];
-          const alpha = computeAlpha(f.chroma[pc]);
+          const hue = semitoneToHue(semi);
+          const pcLo = Math.floor(semi < 0 ? semi + 12 : semi) % 12;
+          const pcHi = (pcLo + 1) % 12;
+          const alpha = computeAlpha(Math.max(f.chroma[pcLo], f.chroma[pcHi]));
 
           drawFirefly(hue, alpha, HX, y, HX - shift, monoPrevY);
           monoPrevY = y;
@@ -319,12 +348,14 @@
           monoSmoothY = null;
           monoPrevPc = null;
           monoOnsetMs = null;
+          monoPrevSemi = null;
         }
       } else {
         monoPrevY = null;
         monoSmoothY = null;
         monoPrevPc = null;
         monoOnsetMs = null;
+        monoPrevSemi = null;
       }
     }
   }
