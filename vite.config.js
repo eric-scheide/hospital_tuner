@@ -7,7 +7,7 @@ import { svelte } from '@sveltejs/vite-plugin-svelte';
 import wasm from 'vite-plugin-wasm';
 
 export default defineConfig({
-  base: '/static/hospital_tuner/',
+  base: './',
   plugins: [
     // Svelte compiler plugin — handles .svelte files
     svelte(),

@@ -235,7 +235,7 @@ async function initWasmFromFetch(wasmUrl) {
 // AudioWorkletProcessor
 // ---------------------------------------------------------------------------
 
-const WASM_URL = '/wasm-pkg/hospital_tuner_dsp_bg.wasm';
+const WASM_URL = '../wasm-pkg/hospital_tuner_dsp_bg.wasm';
 
 class HospitalTunerProcessor extends AudioWorkletProcessor {
   constructor(options) {
