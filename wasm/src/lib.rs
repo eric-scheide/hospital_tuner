@@ -22,8 +22,8 @@ use chroma::{
     FFT_SIZE, HOP_SIZE,
     DEFAULT_GATE_RATIO, PRESENCE_THRESHOLD,
     estimate_noise_floor, whiten_spectrum, apply_gate,
-    pick_peaks, suppress_harmonics, compute_chroma, normalize_chroma,
-    find_dominant, active_pitch_classes,
+    pick_peaks, suppress_harmonics, compute_chroma, compute_chroma_freqs,
+    normalize_chroma, find_dominant, active_pitch_classes,
 };
 
 // ---------------------------------------------------------------------------
@@ -44,8 +44,14 @@ use chroma::{
 pub struct ChromaResult {
     /// 12-element chroma vector, pitch classes C=0 … B=11, normalised to [0,1].
     chroma: [f32; 12],
+    /// Per-pitch-class dominant frequency (Hz).  For each PC, the frequency of
+    /// the strongest spectral peak that maps to that PC; 0.0 if no peak.
+    chroma_freqs: [f32; 12],
     /// Active pitch class indices (chroma >= presence_threshold).
     active_pitch_classes: Vec<u8>,
+    /// Maximum chroma bin energy before normalisation.  Indicates overall
+    /// signal strength; useful for suppressing noise during quiet passages.
+    chroma_max: f32,
     /// Hz of the strongest surviving spectral peak; 0.0 if silent.
     dominant_frequency: f32,
     /// Cents deviation of dominant_frequency from nearest equal-temperament note.
@@ -66,6 +72,17 @@ impl ChromaResult {
     /// Always returns 12.  Provided for symmetry / defensive JS code.
     pub fn chroma_len(&self) -> u32 {
         12
+    }
+
+    /// Pointer to the 12-element per-pitch-class dominant-frequency array.
+    /// Each entry is Hz of the strongest peak for that PC, or 0.0 if none.
+    pub fn chroma_freqs_ptr(&self) -> u32 {
+        self.chroma_freqs.as_ptr() as u32
+    }
+
+    /// Maximum chroma bin energy before normalisation.
+    pub fn chroma_max(&self) -> f32 {
+        self.chroma_max
     }
 
     /// Active pitch class indices (0=C … 11=B) whose normalised chroma energy
@@ -116,6 +133,10 @@ pub struct TunerProcessor {
     presence_threshold: f32,
     /// When true, attenuate peaks that are integer harmonics of a stronger peak.
     harmonic_suppression: bool,
+    /// Harmonic suppression strength: 0.0 = off, 1.0 = standard 1/r subtraction, 2.0 = aggressive.
+    harmonic_strength: f32,
+    /// Highest harmonic ratio to check (2..=max_ratio).
+    harmonic_max_ratio: usize,
     /// How many new samples have accumulated since the last analysis frame.
     /// A new ChromaResult is produced when this reaches HOP_SIZE.
     samples_since_hop: usize,
@@ -145,6 +166,8 @@ impl TunerProcessor {
             gate_ratio: DEFAULT_GATE_RATIO,
             presence_threshold: PRESENCE_THRESHOLD,
             harmonic_suppression: true,
+            harmonic_strength: 1.0,
+            harmonic_max_ratio: 6,
             samples_since_hop: 0,
         }
     }
@@ -195,11 +218,17 @@ impl TunerProcessor {
 
         // Step 10 — optionally suppress harmonic overtones.
         if self.harmonic_suppression {
-            suppress_harmonics(&mut peaks);
+            suppress_harmonics(&mut peaks, self.harmonic_strength, self.harmonic_max_ratio);
         }
 
         // Step 11 — map peaks to 12-bin chroma vector.
         let mut chroma = compute_chroma(&peaks, self.sample_rate, FFT_SIZE);
+
+        // Step 11b — per-pitch-class dominant frequencies (before normalisation).
+        let chroma_freqs = compute_chroma_freqs(&peaks, self.sample_rate, FFT_SIZE);
+
+        // Step 11c — capture max before normalisation (for quiet-signal attenuation).
+        let chroma_max = chroma.iter().cloned().fold(0.0f32, f32::max);
 
         // Step 12 — normalise chroma to [0.0, 1.0].
         normalize_chroma(&mut chroma);
@@ -216,6 +245,8 @@ impl TunerProcessor {
         // Step 16 — return the result; JS owns it and must call .free().
         Some(ChromaResult {
             chroma,
+            chroma_freqs,
+            chroma_max,
             active_pitch_classes: active,
             dominant_frequency,
             cents,
@@ -237,6 +268,18 @@ impl TunerProcessor {
     /// Enable or disable harmonic suppression.  Default: enabled.
     pub fn set_harmonic_suppression(&mut self, enabled: bool) {
         self.harmonic_suppression = enabled;
+    }
+
+    /// Set harmonic suppression strength.
+    /// 0.0 = off, 1.0 = standard 1/r subtraction (default), 2.0 = aggressive.
+    pub fn set_harmonic_strength(&mut self, strength: f32) {
+        self.harmonic_strength = strength.clamp(0.0, 4.0);
+    }
+
+    /// Set the highest harmonic ratio to check (2..=max_ratio).
+    /// Default 6.  Clamped to [2, 12].
+    pub fn set_harmonic_max_ratio(&mut self, max_ratio: u32) {
+        self.harmonic_max_ratio = (max_ratio as usize).clamp(2, 12);
     }
 
     /// Flush the ring buffer and reset the noise floor estimator.
@@ -425,5 +468,97 @@ mod tests {
         assert!(!tp.ring_buffer.is_ready(), "ring buffer should be empty after reset");
         assert!(tp.noise_floor_ema.is_empty(), "EMA should be cleared after reset");
         assert_eq!(tp.samples_since_hop, 0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 9 — chroma_max captures pre-normalization maximum
+    // -----------------------------------------------------------------------
+    #[test]
+    fn chroma_max_reflects_pre_normalization_energy() {
+        use crate::chroma::normalize_chroma;
+
+        let mut chroma = [0.0f32; 12];
+        chroma[9] = 42.0;
+        chroma[0] = 10.0;
+
+        let chroma_max = chroma.iter().cloned().fold(0.0f32, f32::max);
+        assert!((chroma_max - 42.0).abs() < 1e-6);
+
+        normalize_chroma(&mut chroma);
+        assert!((chroma[9] - 1.0).abs() < 1e-6);
+        // chroma_max was captured before normalization
+        assert!((chroma_max - 42.0).abs() < 1e-6);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 10 — chroma_max is 0.0 for silence
+    // -----------------------------------------------------------------------
+    #[test]
+    fn chroma_max_zero_for_silence() {
+        let chroma = [0.0f32; 12];
+        let chroma_max = chroma.iter().cloned().fold(0.0f32, f32::max);
+        assert!(chroma_max == 0.0);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 11 — process with 440 Hz sine produces non-zero chroma_max
+    // -----------------------------------------------------------------------
+    #[test]
+    fn process_sine_produces_nonzero_chroma_max() {
+        let mut tp = TunerProcessor::new(44100.0);
+        let sr = 44100.0f32;
+        let freq = 440.0f32;
+
+        let mut last_result = None;
+        for chunk in 0..64 {
+            let mut samples = vec![0.0f32; 128];
+            for i in 0..128 {
+                let t = (chunk * 128 + i) as f32 / sr;
+                samples[i] = 0.5 * (2.0 * std::f32::consts::PI * freq * t).sin();
+            }
+            if let Some(r) = tp.process(&samples) {
+                last_result = Some(r);
+            }
+        }
+
+        if let Some(r) = last_result {
+            assert!(
+                r.chroma_max > 0.0,
+                "chroma_max should be > 0 for 440 Hz sine, got {}",
+                r.chroma_max
+            );
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test 12 — process with 440 Hz sine has correct chroma_freqs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn process_sine_chroma_freqs_near_440() {
+        let mut tp = TunerProcessor::new(44100.0);
+        let sr = 44100.0f32;
+        let freq = 440.0f32;
+
+        let mut last_result = None;
+        for chunk in 0..64 {
+            let mut samples = vec![0.0f32; 128];
+            for i in 0..128 {
+                let t = (chunk * 128 + i) as f32 / sr;
+                samples[i] = 0.5 * (2.0 * std::f32::consts::PI * freq * t).sin();
+            }
+            if let Some(r) = tp.process(&samples) {
+                last_result = Some(r);
+            }
+        }
+
+        if let Some(r) = last_result {
+            if r.chroma_freqs[9] > 0.0 {
+                assert!(
+                    (r.chroma_freqs[9] - 440.0).abs() < 15.0,
+                    "chroma_freqs[9] should be near 440 Hz, got {}",
+                    r.chroma_freqs[9]
+                );
+            }
+        }
     }
 }

@@ -246,29 +246,39 @@ pub fn pick_peaks(gated: &[f32], sample_rate: f32, fft_size: usize) -> Vec<(usiz
 // suppress_harmonics
 // ---------------------------------------------------------------------------
 
-/// Attenuate peaks that appear to be integer harmonics of a stronger peak.
+/// Suppress peaks that appear to be integer harmonics of a stronger peak
+/// by subtracting the expected harmonic contribution.
 ///
-/// Algorithm:
-///   1. Sort peaks by magnitude (descending) so we process the strongest first.
-///   2. For each peak `p`, check harmonic ratios 2..=6.
-///   3. For each ratio `r`, compute the expected harmonic bin
-///      `expected = p.bin * r`.
-///   4. If any weaker peak `q` lies within a frequency-adaptive tolerance of
-///      `expected`, multiply `q.magnitude` by 0.5 (−6 dB).
-///      Tolerance = `max(1, round(expected * 0.02))` — 2% of the expected bin,
-///      giving tight tolerance at low frequencies and looser at high.
+/// Natural harmonics of a fundamental fall off roughly as 1/r (where r is the
+/// harmonic ratio).  For each detected harmonic match, we subtract:
+///
+///     q.mag = max(0, q.mag − p.mag × strength / r)
+///
+/// This scales with the fundamental's loudness: a loud note subtracts more
+/// from its harmonics than a quiet one.  If energy remains after subtraction,
+/// it's likely an independent pitch (e.g. a real chord note).
+///
+/// Parameters:
+///   - `strength`: 0.0 = off, 1.0 = standard 1/r model, 2.0 = aggressive.
+///   - `max_ratio`: highest harmonic ratio to check (default 6).
 ///
 /// This is O(n²) over peaks; in practice there are < 20 peaks per frame.
-pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>) {
+pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>, strength: f32, max_ratio: usize) {
+    if strength <= 0.0 {
+        return;
+    }
+
     // Sort descending by magnitude (strongest first).
     peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(core::cmp::Ordering::Equal));
 
     let n = peaks.len();
     for p_idx in 0..n {
         let p_bin = peaks[p_idx].0;
-        for r in 2usize..=6 {
+        let p_mag = peaks[p_idx].1;
+        for r in 2usize..=max_ratio {
             let expected = p_bin * r;
             let tolerance = 1usize.max((expected as f32 * 0.02).round() as usize);
+            let subtraction = p_mag * strength / r as f32;
             for q_idx in (p_idx + 1)..n {
                 let q_bin = peaks[q_idx].0;
                 let diff = if q_bin >= expected {
@@ -277,7 +287,7 @@ pub fn suppress_harmonics(peaks: &mut Vec<(usize, f32)>) {
                     expected - q_bin
                 };
                 if diff <= tolerance {
-                    peaks[q_idx].1 *= 0.5;
+                    peaks[q_idx].1 = (peaks[q_idx].1 - subtraction).max(0.0);
                 }
             }
         }
@@ -314,6 +324,37 @@ pub fn compute_chroma(peaks: &[(usize, f32)], sample_rate: f32, fft_size: usize)
         chroma[pc as usize] += mag;
     }
     chroma
+}
+
+// ---------------------------------------------------------------------------
+// compute_chroma_freqs
+// ---------------------------------------------------------------------------
+
+/// For each pitch class, return the frequency (Hz) of the strongest peak
+/// that maps to that PC.  Returns 0.0 for pitch classes with no peaks.
+/// Call on the same peaks used for `compute_chroma`.
+pub fn compute_chroma_freqs(peaks: &[(usize, f32)], sample_rate: f32, fft_size: usize) -> [f32; 12] {
+    let mut best_freq = [0.0f32; 12];
+    let mut best_mag  = [0.0f32; 12];
+    let bin_to_hz = sample_rate / fft_size as f32;
+
+    for &(bin, mag) in peaks {
+        let freq = bin as f32 * bin_to_hz;
+        if freq <= 0.0 {
+            continue;
+        }
+        let midi = 12.0 * (freq / A4_HZ).log2() + A4_MIDI;
+        let mut pc = midi.round() as i32 % 12;
+        if pc < 0 {
+            pc += 12;
+        }
+        let pc = pc as usize;
+        if mag > best_mag[pc] {
+            best_mag[pc] = mag;
+            best_freq[pc] = freq;
+        }
+    }
+    best_freq
 }
 
 // ---------------------------------------------------------------------------
@@ -551,7 +592,7 @@ mod tests {
     fn suppress_harmonics_attenuates_overtones() {
         // Fundamental at bin 40, harmonic at bin 80 (2x)
         let mut peaks = vec![(40usize, 1.0f32), (80usize, 0.8f32)];
-        suppress_harmonics(&mut peaks);
+        suppress_harmonics(&mut peaks, 1.0, 6);
 
         // Find the peak at bin 80 after suppression
         let harmonic_mag = peaks
@@ -612,5 +653,77 @@ mod tests {
             "cents should be in [-50,50], got {}",
             cents
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: compute_chroma_freqs — A4 peak returns Hz in PC 9
+    // -----------------------------------------------------------------------
+    #[test]
+    fn compute_chroma_freqs_a4_peak_returns_hz_in_pc9() {
+        let a4_bin = (A4_HZ * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let peaks = vec![(a4_bin, 1.0f32)];
+        let freqs = compute_chroma_freqs(&peaks, SAMPLE_RATE, FFT_SIZE);
+
+        let expected_hz = a4_bin as f32 * SAMPLE_RATE / FFT_SIZE as f32;
+        assert!(
+            (freqs[9] - expected_hz).abs() < 1.0,
+            "chroma_freqs[9] should be ~{:.1} Hz, got {:.1}",
+            expected_hz, freqs[9]
+        );
+        for (i, &f) in freqs.iter().enumerate() {
+            if i != 9 {
+                assert!(f == 0.0, "chroma_freqs[{}] should be 0.0, got {}", i, f);
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: compute_chroma_freqs — empty peaks returns all zeros
+    // -----------------------------------------------------------------------
+    #[test]
+    fn compute_chroma_freqs_empty_peaks_returns_zeros() {
+        let peaks: Vec<(usize, f32)> = vec![];
+        let freqs = compute_chroma_freqs(&peaks, SAMPLE_RATE, FFT_SIZE);
+        for (i, &f) in freqs.iter().enumerate() {
+            assert!(f == 0.0, "chroma_freqs[{}] should be 0.0, got {}", i, f);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: compute_chroma_freqs — multiple peaks in same PC keeps strongest
+    // -----------------------------------------------------------------------
+    #[test]
+    fn compute_chroma_freqs_keeps_strongest_peak_per_pc() {
+        let a4_bin = (A4_HZ * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let a5_bin = (880.0 * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let peaks = vec![(a4_bin, 0.5f32), (a5_bin, 1.0f32)];
+        let freqs = compute_chroma_freqs(&peaks, SAMPLE_RATE, FFT_SIZE);
+
+        let a5_hz = a5_bin as f32 * SAMPLE_RATE / FFT_SIZE as f32;
+        assert!(
+            (freqs[9] - a5_hz).abs() < 1.0,
+            "chroma_freqs[9] should be A5 (~{:.1} Hz), got {:.1}",
+            a5_hz, freqs[9]
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test: compute_chroma_freqs — chord populates multiple PCs
+    // -----------------------------------------------------------------------
+    #[test]
+    fn compute_chroma_freqs_chord_populates_multiple_pcs() {
+        let c4_bin = (261.63 * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let e4_bin = (329.63 * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let g4_bin = (392.00 * FFT_SIZE as f32 / SAMPLE_RATE).round() as usize;
+        let peaks = vec![(c4_bin, 1.0f32), (e4_bin, 0.8f32), (g4_bin, 0.6f32)];
+        let freqs = compute_chroma_freqs(&peaks, SAMPLE_RATE, FFT_SIZE);
+
+        assert!(freqs[0] > 0.0, "C should have frequency, got {}", freqs[0]);
+        assert!(freqs[4] > 0.0, "E should have frequency, got {}", freqs[4]);
+        assert!(freqs[7] > 0.0, "G should have frequency, got {}", freqs[7]);
+
+        for i in [1, 2, 3, 5, 6, 8, 9, 10, 11] {
+            assert!(freqs[i] == 0.0, "chroma_freqs[{}] should be 0.0, got {}", i, freqs[i]);
+        }
     }
 }

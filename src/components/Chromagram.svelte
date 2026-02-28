@@ -14,6 +14,8 @@
   export let minDuration = 15; // ms pitch must be continuous before plotting
   export let smoothness = 0.385; // EMA factor: 0 = no smoothing, 1 = frozen
   export let scrollSpeed = 1.5; // pixels per frame
+  export let polyphonic = false;
+  export let squelchDb = -10; // dB threshold: signals below this are suppressed
 
   let wrapper;
   let labelCanvas;
@@ -33,13 +35,69 @@
   let logicalW = 0;
   let logicalH = 0;
   let dpr = 1;
-  let prevY = null;
-  let smoothY = null;
   $: SMOOTH = smoothness;
   $: MIN_DURATION_MS = minDuration; // pitch must be continuous this long before plotting
-  let pitchOnsetMs = null;   // timestamp when current pitch class started
-  let prevPc = null;         // previous pitch class (for continuity check)
   let scrollAccum = 0;       // fractional pixel accumulator for smooth scroll speed
+
+  // Per-pitch-class state for polyphonic mode
+  let noteState = Array.from({length: 12}, () => ({
+    prevY: null, smoothY: null, onsetMs: null, active: false,
+  }));
+
+  // Scalar state for monophonic mode
+  let monoPrevY = null;
+  let monoSmoothY = null;
+  let monoPrevPc = null;
+  let monoOnsetMs = null;
+
+  function resetAllState() {
+    for (let i = 0; i < 12; i++) {
+      noteState[i].prevY = null;
+      noteState[i].smoothY = null;
+      noteState[i].onsetMs = null;
+      noteState[i].active = false;
+    }
+    monoPrevY = null;
+    monoSmoothY = null;
+    monoPrevPc = null;
+    monoOnsetMs = null;
+  }
+
+  // Reset state when toggling polyphonic mode
+  $: polyphonic, resetAllState();
+
+  // Firefly glow layer definitions (width, lightness%, alphaScale)
+  const FIREFLY_LAYERS = [
+    { width: 14, lightness: 65, alphaScale: 0.1 },
+    { width: 8,  lightness: 65, alphaScale: 0.3 },
+    { width: 4,  lightness: 65, alphaScale: 0.6 },
+    { width: 1.5, lightness: 85, alphaScale: 1.0 },
+  ];
+
+  function drawFirefly(hue, alpha, x, y, prevX, prevY) {
+    // Connect to previous point with glow strokes
+    if (prevY !== null && Math.abs(y - prevY) < logicalH * 0.4) {
+      for (const layer of FIREFLY_LAYERS) {
+        ctx.strokeStyle = `hsla(${hue}, 100%, ${layer.lightness}%, ${alpha * layer.alphaScale})`;
+        ctx.lineWidth = layer.width;
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(prevX, prevY);
+        ctx.lineTo(x, y);
+        ctx.stroke();
+      }
+    }
+    // Glow halo
+    ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.12})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, 2 * Math.PI);
+    ctx.fill();
+    // Core dot
+    ctx.fillStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
+    ctx.beginPath();
+    ctx.arc(x, y, 2.5, 0, 2 * Math.PI);
+    ctx.fill();
+  }
 
   function freqToSemitone(freq) {
     if (freq <= 0) return -1;
@@ -129,8 +187,7 @@
     ctx = canvas.getContext('2d');
     ctx.scale(dpr, dpr);
 
-    prevY = null;
-    smoothY = null;
+    resetAllState();
   }
 
   function drawFullGrid() {
@@ -144,6 +201,12 @@
       gridCtx.lineTo(logicalW, y);
       gridCtx.stroke();
     }
+  }
+
+  function computeAlpha(energy) {
+    const threshold = (100 - sensitivity) / 100;
+    const rawLogE = energy > 0 ? Math.max(0, 1 + Math.log10(energy) / 2) : 0;
+    return threshold < 1 && rawLogE > threshold ? (rawLogE - threshold) / (1 - threshold) : 0;
   }
 
   function drawFrame(f) {
@@ -163,106 +226,106 @@
       ctx.putImageData(imgData, 0, 0);
     }
 
-    // 3. Plot the dominant frequency (octave-folded)
-    const freq = f.dominantFrequency;
     const now = f.timestamp ?? performance.now();
-    if (freq > 0) {
-      const semi = freqToSemitone(freq);
-      if (semi >= -0.5) {
-        let pc = Math.round(semi) % 12;
-        if (pc < 0) pc += 12;
 
-        // Track pitch continuity — reset onset and break the trace when pitch class changes
-        if (pc !== prevPc) {
-          pitchOnsetMs = now;
-          prevPc = pc;
-          prevY = null;
-          smoothY = null;
+    if (polyphonic) {
+      // --- Polyphonic mode: render all pitch classes with sufficient energy ---
+      // Uses per-PC dominant frequencies for sub-semitone Y positioning
+      // (same continuous tracking as mono mode).
+      const chroma = f.chroma;           // Float32Array[12], normalized 0–1
+      const chromaFreqs = f.chromaFreqs; // Float32Array[12], Hz per PC
+      // Squelch: suppress display when signal level (in dB) is below threshold.
+      // chromaMax is pre-normalization peak chroma energy; convert to dB.
+      const cm = f.chromaMax || 0;
+      const signalDb = cm > 0 ? 10 * Math.log10(cm) : -Infinity;
+      const gateOpen = signalDb >= squelchDb;
+
+      for (let pc = 0; pc < 12; pc++) {
+        const ns = noteState[pc];
+        const alpha = gateOpen ? computeAlpha(chroma[pc]) : 0;
+        const freq = chromaFreqs ? chromaFreqs[pc] : 0;
+        const isActive = alpha > 0.02 && freq > 0;
+
+        if (!isActive) {
+          ns.active = false;
+          ns.prevY = null;
+          ns.smoothY = null;
+          ns.onsetMs = null;
+          continue;
+        }
+
+        // Newly active: start onset timer, break trace
+        if (!ns.active) {
+          ns.active = true;
+          ns.onsetMs = now;
+          ns.prevY = null;
+          ns.smoothY = null;
         }
 
         // Gate: don't plot until pitch has been continuous for MIN_DURATION_MS
-        if (now - pitchOnsetMs < MIN_DURATION_MS) return;
+        if (now - ns.onsetMs < MIN_DURATION_MS) continue;
 
+        // Use actual frequency for sub-semitone Y position (like mono mode)
+        const semi = freqToSemitone(freq);
         const rawY = semitoneToY(semi);
-        // EMA smoothing — snap on large jumps (octave wrap), blend otherwise
-        if (smoothY === null || Math.abs(rawY - smoothY) > logicalH * 0.4) {
-          smoothY = rawY;
+        // EMA smoothing
+        if (ns.smoothY === null || Math.abs(rawY - ns.smoothY) > logicalH * 0.4) {
+          ns.smoothY = rawY;
         } else {
-          smoothY = SMOOTH * smoothY + (1 - SMOOTH) * rawY;
+          ns.smoothY = SMOOTH * ns.smoothY + (1 - SMOOTH) * rawY;
         }
-        const y = smoothY;
+        const y = ns.smoothY;
 
         const hue = PITCH_HUES[pc];
-        const energy = f.chroma[pc];
-        // sensitivity 0 → threshold=1 (nothing visible), 100 → threshold=0 (everything visible)
-        const threshold = (100 - sensitivity) / 100;
-        const rawLogE = energy > 0 ? Math.max(0, 1 + Math.log10(energy) / 2) : 0;
-        const logE = threshold < 1 && rawLogE > threshold ? (rawLogE - threshold) / (1 - threshold) : 0;
-        const alpha = logE;
 
-        // Connect to previous point (unless it wrapped around the octave boundary)
-        if (prevY !== null && Math.abs(y - prevY) < logicalH * 0.4) {
-          // Outer glow — wide transparent fringe
-          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.1})`;
-          ctx.lineWidth = 14;
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(HX - shift, prevY);
-          ctx.lineTo(HX, y);
-          ctx.stroke();
-
-          // Mid glow
-          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.3})`;
-          ctx.lineWidth = 8;
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(HX - shift, prevY);
-          ctx.lineTo(HX, y);
-          ctx.stroke();
-
-          // Inner glow
-          ctx.strokeStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.6})`;
-          ctx.lineWidth = 4;
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(HX - shift, prevY);
-          ctx.lineTo(HX, y);
-          ctx.stroke();
-
-          // Core stroke — bright center
-          ctx.strokeStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
-          ctx.lineWidth = 1.5;
-          ctx.lineCap = 'round';
-          ctx.beginPath();
-          ctx.moveTo(HX - shift, prevY);
-          ctx.lineTo(HX, y);
-          ctx.stroke();
-        }
-
-        // Glow halo — wide soft dot
-        ctx.fillStyle = `hsla(${hue}, 100%, 65%, ${alpha * 0.12})`;
-        ctx.beginPath();
-        ctx.arc(HX, y, 10, 0, 2 * Math.PI);
-        ctx.fill();
-
-        // Core dot
-        ctx.fillStyle = `hsla(${hue}, 100%, 85%, ${alpha})`;
-        ctx.beginPath();
-        ctx.arc(HX, y, 2.5, 0, 2 * Math.PI);
-        ctx.fill();
-
-        prevY = y;
-      } else {
-        prevY = null;
-        smoothY = null;
-        prevPc = null;
-        pitchOnsetMs = null;
+        drawFirefly(hue, alpha, HX, y, HX - shift, ns.prevY);
+        ns.prevY = y;
       }
     } else {
-      prevY = null;
-      smoothY = null;
-      prevPc = null;
-      pitchOnsetMs = null;
+      // --- Monophonic mode: single dominant frequency (original behavior) ---
+      const freq = f.dominantFrequency;
+      if (freq > 0) {
+        const semi = freqToSemitone(freq);
+        if (semi >= -0.5) {
+          let pc = Math.round(semi) % 12;
+          if (pc < 0) pc += 12;
+
+          // Track pitch continuity
+          if (pc !== monoPrevPc) {
+            monoOnsetMs = now;
+            monoPrevPc = pc;
+            monoPrevY = null;
+            monoSmoothY = null;
+          }
+
+          // Gate: don't plot until pitch has been continuous for MIN_DURATION_MS
+          if (now - monoOnsetMs < MIN_DURATION_MS) return;
+
+          const rawY = semitoneToY(semi);
+          if (monoSmoothY === null || Math.abs(rawY - monoSmoothY) > logicalH * 0.4) {
+            monoSmoothY = rawY;
+          } else {
+            monoSmoothY = SMOOTH * monoSmoothY + (1 - SMOOTH) * rawY;
+          }
+          const y = monoSmoothY;
+
+          const hue = PITCH_HUES[pc];
+          const alpha = computeAlpha(f.chroma[pc]);
+
+          drawFirefly(hue, alpha, HX, y, HX - shift, monoPrevY);
+          monoPrevY = y;
+        } else {
+          monoPrevY = null;
+          monoSmoothY = null;
+          monoPrevPc = null;
+          monoOnsetMs = null;
+        }
+      } else {
+        monoPrevY = null;
+        monoSmoothY = null;
+        monoPrevPc = null;
+        monoOnsetMs = null;
+      }
     }
   }
 

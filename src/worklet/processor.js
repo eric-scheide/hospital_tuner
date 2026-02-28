@@ -124,6 +124,12 @@ class ChromaResult {
   chroma_len() {
     return wasm.chromaresult_chroma_len(this.__wbg_ptr) >>> 0;
   }
+  chroma_freqs_ptr() {
+    return wasm.chromaresult_chroma_freqs_ptr(this.__wbg_ptr) >>> 0;
+  }
+  chroma_max() {
+    return wasm.chromaresult_chroma_max(this.__wbg_ptr);
+  }
   chroma_ptr() {
     return wasm.chromaresult_chroma_ptr(this.__wbg_ptr) >>> 0;
   }
@@ -163,6 +169,12 @@ class TunerProcessor {
   }
   set_harmonic_suppression(enabled) {
     wasm.tunerprocessor_set_harmonic_suppression(this.__wbg_ptr, enabled);
+  }
+  set_harmonic_strength(strength) {
+    wasm.tunerprocessor_set_harmonic_strength(this.__wbg_ptr, strength);
+  }
+  set_harmonic_max_ratio(max_ratio) {
+    wasm.tunerprocessor_set_harmonic_max_ratio(this.__wbg_ptr, max_ratio);
   }
   set_presence_threshold(threshold) {
     wasm.tunerprocessor_set_presence_threshold(this.__wbg_ptr, threshold);
@@ -282,6 +294,12 @@ class HospitalTunerProcessor extends AudioWorkletProcessor {
       case 'setHarmonicSuppression':
         this._processor.set_harmonic_suppression(enabled);
         break;
+      case 'setHarmonicStrength':
+        this._processor.set_harmonic_strength(value);
+        break;
+      case 'setHarmonicMaxRatio':
+        this._processor.set_harmonic_max_ratio(value);
+        break;
       case 'reset':
         this._processor.reset();
         break;
@@ -302,7 +320,14 @@ class HospitalTunerProcessor extends AudioWorkletProcessor {
           result.chroma_len(),
         ).slice();
 
+        const chromaFreqs = new Float32Array(
+          wasm.memory.buffer,
+          result.chroma_freqs_ptr(),
+          12,
+        ).slice();
+
         const activePitchClasses = result.active_pitch_classes();
+        const chromaMax          = result.chroma_max();
         const dominantFrequency  = result.dominant_frequency();
         const cents              = result.cents();
 
@@ -312,12 +337,14 @@ class HospitalTunerProcessor extends AudioWorkletProcessor {
           {
             type: 'tunerFrame',
             chroma,
+            chromaFreqs,
+            chromaMax,
             activePitchClasses,
             dominantFrequency,
             cents,
             timestamp: currentTime * 1000,
           },
-          [chroma.buffer, activePitchClasses.buffer],
+          [chroma.buffer, chromaFreqs.buffer, activePitchClasses.buffer],
         );
       }
     } catch (err) {

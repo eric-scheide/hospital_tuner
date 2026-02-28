@@ -26,10 +26,13 @@
   }
   $: gateRatio = sliderToGate(gateSlider);
   let harmonicSuppression = true;
+  let harmonicStrength = 50; // 0=off, 50=default (−6dB, ratio 6), 100=aggressive (−26dB, ratio 10)
   let sensitivity = 10;
   let minDuration = 15;
   let smoothness = 0.385;
   let scrollSpeed = 1.5;
+  let polyphonic = false;
+  let squelchDb = -10; // dB threshold: signals below this are suppressed
   let gearOpen = false;
 
   function toggleGear() {
@@ -127,7 +130,7 @@
         status = 'ready';
         // Apply initial control values to the worklet
         sendGateRatio(gateRatio);
-        sendHarmonicSuppression(harmonicSuppression);
+        sendHarmonicStrength();
         break;
       case 'error':
         status = 'error';
@@ -174,6 +177,20 @@
 
   function onGateRatioChange() {
     sendGateRatio(gateRatio);
+  }
+
+  // Map slider (0–100) to suppression parameters:
+  //   strength: 0→0, 50→1.0 (standard 1/r model), 100→2.0 (aggressive)
+  //   max_ratio: 0→2, 50→6, 100→10
+  function sendHarmonicStrength() {
+    const on = harmonicStrength > 0;
+    sendHarmonicSuppression(on);
+    if (on) {
+      const strength = harmonicStrength / 50; // 0–2.0
+      const maxRatio = Math.round(2 + (harmonicStrength / 100) * 8); // 2–10
+      workletNode?.port.postMessage({ type: 'setHarmonicStrength', value: strength });
+      workletNode?.port.postMessage({ type: 'setHarmonicMaxRatio', value: maxRatio });
+    }
   }
 
   function onHarmonicSuppressionChange() {
@@ -225,10 +242,22 @@
                 <span class="control-value">{scrollSpeed.toFixed(1)}x</span>
               </label>
               <label class="control-label">
-                <span class="control-name">Harmonic suppression</span>
-                <input type="checkbox" bind:checked={harmonicSuppression} on:change={onHarmonicSuppressionChange} class="checkbox" />
-                <span class="control-value">{harmonicSuppression ? 'On' : 'Off'}</span>
+                <span class="control-name">Harmonic supp.</span>
+                <input type="range" min="0" max="100" step="1" bind:value={harmonicStrength} on:input={sendHarmonicStrength} class="slider" />
+                <span class="control-value">{harmonicStrength === 0 ? 'Off' : harmonicStrength + '%'}</span>
               </label>
+              <label class="control-label">
+                <span class="control-name">Polyphonic</span>
+                <input type="checkbox" bind:checked={polyphonic} class="checkbox" />
+                <span class="control-value">{polyphonic ? 'On' : 'Off'}</span>
+              </label>
+              {#if polyphonic}
+                <label class="control-label">
+                  <span class="control-name">Squelch</span>
+                  <input type="range" min="-20" max="40" step="1" bind:value={squelchDb} class="slider" />
+                  <span class="control-value">{squelchDb} dB</span>
+                </label>
+              {/if}
             </div>
           {/if}
         </div>
@@ -253,7 +282,7 @@
 
   <!-- Chromagram canvas (fills available space) -->
   <div class="chromagram-container">
-    <Chromagram {frame} {sensitivity} {minDuration} {smoothness} {scrollSpeed} />
+    <Chromagram {frame} {sensitivity} {minDuration} {smoothness} {scrollSpeed} {polyphonic} {squelchDb} />
   </div>
 
 </div>
